@@ -33,6 +33,7 @@ impl Default for AuthErrorResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {
     pub ok: bool,
+    pub version: &'static str,
 }
 
 /// Shared authentication state storing the configured Bearer token.
@@ -69,12 +70,15 @@ pub fn unauthorized_response() -> Response {
         .into_response()
 }
 
-/// Public health check handler returning HTTP 200 OK with `{ "ok": true }`.
+/// Public health check handler returning HTTP 200 OK with `{ "ok": true, "version": "..." }`.
 pub async fn health_handler() -> impl IntoResponse {
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
-        Json(HealthResponse { ok: true }),
+        Json(HealthResponse {
+            ok: true,
+            version: "v2-free-ai",
+        }),
     )
 }
 
