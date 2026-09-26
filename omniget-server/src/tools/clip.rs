@@ -48,6 +48,9 @@ pub struct ClipResponse {
     pub notion_url: Option<String>,
     pub images_count: usize,
     pub summary: String,
+    pub ai_ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -205,6 +208,8 @@ struct AiSummary {
     category: String,
     priority: String,
     tags: Vec<String>,
+    ai_ok: bool,
+    ai_error: Option<String>,
 }
 
 fn extract_json_object(s: &str) -> Option<Value> {
@@ -277,6 +282,8 @@ async fn generate_summary(
         truncated_text
     );
 
+    let mut last_ai_error: Option<String> = None;
+
     for model in candidate_models {
         tracing::info!("Calling OpenRouter AI with model: {}", model);
         let payload = json!({
@@ -347,9 +354,10 @@ async fn generate_summary(
                                     category: ai_category,
                                     priority: ai_priority,
                                     tags: ai_tags,
+                                    ai_ok: true,
+                                    ai_error: None,
                                 };
                             } else if !content_str.trim().is_empty() {
-                                // If the model gave a raw Thai summary without JSON wrapper, use it directly
                                 tracing::warn!("AI returned non-JSON response, using raw response as summary");
                                 return AiSummary {
                                     title: content.title.clone(),
@@ -357,16 +365,22 @@ async fn generate_summary(
                                     category: "☕ ทั่วไป / ไลฟ์สไตล์".to_string(),
                                     priority: "🟡 ปานกลาง (Medium)".to_string(),
                                     tags: Vec::new(),
+                                    ai_ok: true,
+                                    ai_error: None,
                                 };
                             }
                         }
                     }
                 } else {
-                    tracing::warn!("OpenRouter model {} returned HTTP {}: falling back to next candidate", model, status);
+                    let err_detail = format!("Model {} HTTP {}", model, status);
+                    tracing::warn!("OpenRouter: {}", err_detail);
+                    last_ai_error = Some(err_detail);
                 }
             }
             Err(e) => {
-                tracing::warn!("OpenRouter request failed for {}: {}", model, e);
+                let err_detail = format!("Model {} connection error: {}", model, e);
+                tracing::warn!("OpenRouter: {}", err_detail);
+                last_ai_error = Some(err_detail);
             }
         }
     }
@@ -384,6 +398,8 @@ async fn generate_summary(
         category: "☕ ทั่วไป / ไลฟ์สไตล์".to_string(),
         priority: "🟡 ปานกลาง (Medium)".to_string(),
         tags: Vec::new(),
+        ai_ok: false,
+        ai_error: last_ai_error.or_else(|| Some("All AI candidates failed to respond".to_string())),
     }
 }
 
@@ -804,6 +820,8 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
             notion_url: Some(page_url),
             images_count,
             summary: summary.summary,
+            ai_ok: summary.ai_ok,
+            ai_error: summary.ai_error,
             error: None,
         },
         Err(err) => ClipResponse {
@@ -815,6 +833,8 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
             notion_url: None,
             images_count,
             summary: summary.summary,
+            ai_ok: summary.ai_ok,
+            ai_error: summary.ai_error,
             error: Some(err),
         },
     }
