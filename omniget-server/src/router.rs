@@ -87,6 +87,10 @@ pub fn build_router(state: AppState) -> Router {
             "/api/facebook",
             get(crate::rest::facebook_post_get_handler).post(crate::rest::facebook_post_post_handler),
         )
+        .route(
+            "/api/clip",
+            get(crate::rest::clip_get_handler).post(crate::rest::clip_post_handler),
+        )
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             crate::auth::auth_middleware,

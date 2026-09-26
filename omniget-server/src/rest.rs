@@ -638,6 +638,50 @@ async fn execute_facebook_post(target: &str) -> Response {
     }
 }
 
+// ── Universal Notion Clipper ────────────────────────────────────────────────
+
+/// `GET /api/clip?url=...`
+pub async fn clip_get_handler(req: Request) -> Response {
+    let query = parse_query(&req);
+    let url = query.get("url").cloned().unwrap_or_default();
+    let token = query.get("token").cloned();
+    let notion_database_id = query.get("notion_database_id").cloned();
+    let notion_api_key = query.get("notion_api_key").cloned();
+    let openrouter_api_key = query.get("openrouter_api_key").cloned();
+
+    let args = crate::tools::clip::ClipArgs {
+        url,
+        token,
+        notion_database_id,
+        notion_api_key,
+        openrouter_api_key,
+    };
+
+    let result = crate::tools::clip::execute_clip(args).await;
+    let status = if result.ok {
+        StatusCode::OK
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    (status, Json(result)).into_response()
+}
+
+/// `POST /api/clip` (`{"url": "...", "notion_database_id": "...", ...}`)
+pub async fn clip_post_handler(body: Bytes) -> Response {
+    let args: crate::tools::clip::ClipArgs = match parse_json_payload(body) {
+        Ok(a) => a,
+        Err(resp) => return *resp,
+    };
+
+    let result = crate::tools::clip::execute_clip(args).await;
+    let status = if result.ok {
+        StatusCode::OK
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    (status, Json(result)).into_response()
+}
+
 // ── Generic Stub ─────────────────────────────────────────────────────────────
 
 /// Backward-compatible stub handler.

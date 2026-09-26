@@ -1,5 +1,6 @@
 //! Universal extraction tools registry and dispatch router for omniget-server.
 
+pub mod clip;
 pub mod facebook_post;
 pub mod instagram_post;
 pub mod media_info;
