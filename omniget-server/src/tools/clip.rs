@@ -232,7 +232,7 @@ async fn generate_summary(
     let api_key = api_key_override
         .filter(|k| !k.trim().is_empty())
         .map(String::from)
-        .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
+        .or_else(|| std::env::var("OPENROUTER_API_KEY").ok().filter(|k| !k.trim().is_empty()))
         .unwrap_or_else(|| {
             ["sk-or-v1", "-5d24d5637a339964036704dd7b6f8a29", "0117a00b244857ea02575868ab7ebb69"].concat()
         });
@@ -240,14 +240,15 @@ async fn generate_summary(
     let primary_model = model_override
         .filter(|m| !m.trim().is_empty())
         .map(String::from)
-        .or_else(|| std::env::var("AI_MODEL").ok())
-        .unwrap_or_else(|| "openrouter/free".to_string());
+        .or_else(|| std::env::var("AI_MODEL").ok().filter(|m| !m.trim().is_empty()))
+        .unwrap_or_else(|| "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free".to_string());
 
-    let candidate_models = if primary_model == "openrouter/free" {
-        vec!["openrouter/free".to_string(), "qwen/qwen3.8-27b:free".to_string()]
-    } else {
-        vec![primary_model, "openrouter/free".to_string()]
-    };
+    let candidate_models = vec![
+        primary_model,
+        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free".to_string(),
+        "nvidia/nemotron-3.5-lightning:free".to_string(),
+        "qwen/qwen3.8-27b:free".to_string(),
+    ];
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(35))
@@ -256,8 +257,7 @@ async fn generate_summary(
 
     let truncated_text: String = content.raw_text.chars().take(10000).collect();
     let prompt = format!(
-        "You are an elite research analyst and Notion knowledge architect.\n\
-        Analyze, summarize, and classify this content from {}.\n\
+        "Analyze, summarize, and classify this content from {}.\n\
         Author/Source: {}\n\
         Original Title/URL: {}\n\n\
         --- CONTENT ---\n\
@@ -282,7 +282,14 @@ async fn generate_summary(
         let payload = json!({
             "model": model,
             "max_tokens": 1200,
+            "reasoning": {
+                "max_tokens": 0
+            },
             "messages": [
+                {
+                    "role": "system",
+                    "content": "You are an elite research analyst and Notion knowledge architect. Return ONLY a valid JSON object matching the exact requested keys: title, category, priority, tags, summary. Do not output thinking, reasoning, or explanations outside the JSON."
+                },
                 {
                     "role": "user",
                     "content": prompt
