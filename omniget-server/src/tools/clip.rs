@@ -207,7 +207,23 @@ struct AiSummary {
     tags: Vec<String>,
 }
 
-/// Generates executive summary and title using OpenRouter.
+//fn extract_json_object(s: &str) -> Option<Value> {
+    let trimmed = s.trim();
+    if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
+        return Some(val);
+    }
+    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
+        if start < end {
+            let slice = &trimmed[start..=end];
+            if let Ok(val) = serde_json::from_str::<Value>(slice) {
+                return Some(val);
+            }
+        }
+    }
+    None
+}
+
+/// Generates executive summary and title using OpenRouter with automatic model fallback.
 async fn generate_summary(
     content: &ExtractedContent,
     api_key_override: Option<&str>,
@@ -221,21 +237,27 @@ async fn generate_summary(
             ["sk-or-v1", "-5d24d5637a339964036704dd7b6f8a29", "0117a00b244857ea02575868ab7ebb69"].concat()
         });
 
-    let model = model_override
+    let primary_model = model_override
         .filter(|m| !m.trim().is_empty())
         .map(String::from)
         .or_else(|| std::env::var("AI_MODEL").ok())
-        .unwrap_or_else(|| "google/gemini-2.5-flash".to_string());
+        .unwrap_or_else(|| "openrouter/free".to_string());
+
+    let candidate_models = if primary_model == "openrouter/free" {
+        vec!["openrouter/free".to_string(), "qwen/qwen3.8-27b:free".to_string()]
+    } else {
+        vec![primary_model, "openrouter/free".to_string()]
+    };
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(35))
         .build()
         .unwrap_or_default();
 
-    let truncated_text: String = content.raw_text.chars().take(12000).collect();
+    let truncated_text: String = content.raw_text.chars().take(10000).collect();
     let prompt = format!(
         "You are an elite research analyst and Notion knowledge architect.\n\
-        Analyze and classify this content from {}.\n\
+        Analyze, summarize, and classify this content from {}.\n\
         Author/Source: {}\n\
         Original Title/URL: {}\n\n\
         --- CONTENT ---\n\
@@ -255,80 +277,94 @@ async fn generate_summary(
         truncated_text
     );
 
-    let payload = json!({
-        "model": model,
-        "max_tokens": 1500,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
-    });
-
-    let res = client
-        .post("https://openrouter.ai/api/v1/chat/completions")
-        .header("Authorization", format!("Bearer {}", api_key.trim()))
-        .header("Content-Type", "application/json")
-        .json(&payload)
-        .send()
-        .await;
-
-    if let Ok(resp) = res {
-        if resp.status().is_success() {
-            if let Ok(data) = resp.json::<Value>().await {
-                if let Some(content_str) = data["choices"][0]["message"]["content"].as_str() {
-                    let cleaned = content_str
-                        .trim()
-                        .trim_start_matches("```json")
-                        .trim_start_matches("```")
-                        .trim_end_matches("```")
-                        .trim();
-
-                    if let Ok(parsed) = serde_json::from_str::<Value>(cleaned) {
-                        let ai_title = parsed["title"]
-                            .as_str()
-                            .filter(|s| !s.trim().is_empty())
-                            .unwrap_or(&content.title)
-                            .to_string();
-                        let ai_summary = parsed["summary"]
-                            .as_str()
-                            .filter(|s| !s.trim().is_empty())
-                            .unwrap_or(&content.raw_text)
-                            .to_string();
-                        let ai_category = parsed["category"]
-                            .as_str()
-                            .filter(|s| !s.trim().is_empty())
-                            .unwrap_or("☕ ทั่วไป / ไลฟ์สไตล์")
-                            .to_string();
-                        let ai_priority = parsed["priority"]
-                            .as_str()
-                            .filter(|s| !s.trim().is_empty())
-                            .unwrap_or("🟡 ปานกลาง (Medium)")
-                            .to_string();
-                        let ai_tags: Vec<String> = parsed["tags"]
-                            .as_array()
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|v| v.as_str().map(|s| s.trim_start_matches('#').to_string()))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-
-                        return AiSummary {
-                            title: ai_title,
-                            summary: ai_summary,
-                            category: ai_category,
-                            priority: ai_priority,
-                            tags: ai_tags,
-                        };
-                    }
+    for model in candidate_models {
+        tracing::info!("Calling OpenRouter AI with model: {}", model);
+        let payload = json!({
+            "model": model,
+            "max_tokens": 1200,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
                 }
+            ]
+        });
+
+        let res = client
+            .post("https://openrouter.ai/api/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", api_key.trim()))
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await;
+
+        match res {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    if let Ok(data) = resp.json::<Value>().await {
+                        if let Some(content_str) = data["choices"][0]["message"]["content"].as_str() {
+                            if let Some(parsed) = extract_json_object(content_str) {
+                                let ai_title = parsed["title"]
+                                    .as_str()
+                                    .filter(|s| !s.trim().is_empty())
+                                    .unwrap_or(&content.title)
+                                    .to_string();
+                                let ai_summary = parsed["summary"]
+                                    .as_str()
+                                    .filter(|s| !s.trim().is_empty())
+                                    .unwrap_or(content_str)
+                                    .to_string();
+                                let ai_category = parsed["category"]
+                                    .as_str()
+                                    .filter(|s| !s.trim().is_empty())
+                                    .unwrap_or("☕ ทั่วไป / ไลฟ์สไตล์")
+                                    .to_string();
+                                let ai_priority = parsed["priority"]
+                                    .as_str()
+                                    .filter(|s| !s.trim().is_empty())
+                                    .unwrap_or("🟡 ปานกลาง (Medium)")
+                                    .to_string();
+                                let ai_tags: Vec<String> = parsed["tags"]
+                                    .as_array()
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|v| v.as_str().map(|s| s.trim_start_matches('#').to_string()))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+
+                                return AiSummary {
+                                    title: ai_title,
+                                    summary: ai_summary,
+                                    category: ai_category,
+                                    priority: ai_priority,
+                                    tags: ai_tags,
+                                };
+                            } else if !content_str.trim().is_empty() {
+                                // If the model gave a raw Thai summary without JSON wrapper, use it directly
+                                tracing::warn!("AI returned non-JSON response, using raw response as summary");
+                                return AiSummary {
+                                    title: content.title.clone(),
+                                    summary: content_str.trim().to_string(),
+                                    category: "☕ ทั่วไป / ไลฟ์สไตล์".to_string(),
+                                    priority: "🟡 ปานกลาง (Medium)".to_string(),
+                                    tags: Vec::new(),
+                                };
+                            }
+                        }
+                    }
+                } else {
+                    tracing::warn!("OpenRouter model {} returned HTTP {}: falling back to next candidate", model, status);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("OpenRouter request failed for {}: {}", model, e);
             }
         }
     }
 
-    // Fallback if AI call fails
+    // Fallback if all AI candidate calls fail
     let fallback_summary = if content.raw_text.chars().count() > 500 {
         format!("{}...", content.raw_text.chars().take(497).collect::<String>())
     } else {
@@ -577,8 +613,14 @@ async fn save_to_notion(
     }));
 
     // 5. Extracted High-Resolution Images (Rendered natively as Notion Image blocks)
+    // Exclude Facebook lookaside / static CDN urls that block external hotlinking and cause broken image blocks in Notion
     let valid_images: Vec<&String> = content.images.iter()
-        .filter(|img| img.starts_with("http://") || img.starts_with("https://"))
+        .filter(|img| {
+            let s = img.as_str();
+            (s.starts_with("http://") || s.starts_with("https://"))
+                && !s.contains("lookaside.fbsbx.com")
+                && !s.contains("static.xx.fbcdn.net")
+        })
         .take(10)
         .collect();
 
