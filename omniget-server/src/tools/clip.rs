@@ -288,14 +288,14 @@ async fn generate_summary(
         tracing::info!("Calling OpenRouter AI with model: {}", model);
         let payload = json!({
             "model": model,
-            "max_tokens": 1200,
+            "max_tokens": 2500,
             "reasoning": {
                 "max_tokens": 0
             },
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are an elite research analyst and Notion knowledge architect. Return ONLY a valid JSON object matching the exact requested keys: title, category, priority, tags, summary. Do not output thinking, reasoning, or explanations outside the JSON."
+                    "content": "You are an elite research analyst and Notion knowledge architect. Return ONLY a valid JSON object matching the exact requested keys: title, category, priority, tags, summary. Keep bullet points concise and informative. Never output broken JSON."
                 },
                 {
                     "role": "user",
@@ -318,7 +318,22 @@ async fn generate_summary(
                 if status.is_success() {
                     if let Ok(data) = resp.json::<Value>().await {
                         if let Some(content_str) = data["choices"][0]["message"]["content"].as_str() {
-                            if let Some(parsed) = extract_json_object(content_str) {
+                            let parsed_opt = extract_json_object(content_str).or_else(|| {
+                                // If truncated mid-string or missing closing quotes/brackets, attempt safe repair
+                                let trimmed = content_str.trim();
+                                if trimmed.starts_with('{') {
+                                    // Try closing open quotes and braces
+                                    let repaired = format!("{}\"}}]}}", trimmed);
+                                    extract_json_object(&repaired).or_else(|| {
+                                        let repaired2 = format!("{}}}\"", trimmed);
+                                        extract_json_object(&repaired2)
+                                    })
+                                } else {
+                                    None
+                                }
+                            });
+
+                            if let Some(parsed) = parsed_opt {
                                 let ai_title = parsed["title"]
                                     .as_str()
                                     .filter(|s| !s.trim().is_empty())
@@ -357,8 +372,9 @@ async fn generate_summary(
                                     ai_ok: true,
                                     ai_error: None,
                                 };
-                            } else if !content_str.trim().is_empty() {
-                                tracing::warn!("AI returned non-JSON response, using raw response as summary");
+                            } else if !content_str.trim().is_empty() && !content_str.trim().starts_with('{') {
+                                // Only use raw string if it is actual text, not a broken JSON snippet
+                                tracing::warn!("AI returned non-JSON text, using as summary");
                                 return AiSummary {
                                     title: content.title.clone(),
                                     summary: content_str.trim().to_string(),
