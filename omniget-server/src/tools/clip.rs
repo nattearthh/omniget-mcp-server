@@ -207,7 +207,7 @@ struct AiSummary {
     tags: Vec<String>,
 }
 
-//fn extract_json_object(s: &str) -> Option<Value> {
+fn extract_json_object(s: &str) -> Option<Value> {
     let trimmed = s.trim();
     if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
         return Some(val);
