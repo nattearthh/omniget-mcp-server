@@ -380,10 +380,53 @@ pub async fn web_to_markdown(raw_url: &str) -> Result<WebMarkdownResult> {
         ));
     }
 
-    let raw_html = res
-        .text()
+    // Extract Content-Type header to check for charset
+    let content_type = res
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let bytes = res
+        .bytes()
         .await
         .map_err(|e| anyhow!("Failed to read response body: {}", e))?;
+
+    // Determine encoding: Check Content-Type header or HTML meta tags
+    let mut detected_encoding = None;
+    if content_type.contains("windows-874") || content_type.contains("tis-620") || content_type.contains("tis620") {
+        detected_encoding = Some(encoding_rs::WINDOWS_874);
+    } else {
+        // Inspect beginning of HTML bytes for <meta charset=...>
+        let sample = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]).to_lowercase();
+        if sample.contains("charset=windows-874") || sample.contains("charset=\"windows-874\"")
+            || sample.contains("charset=tis-620") || sample.contains("charset=\"tis-620\"")
+            || sample.contains("charset=tis620") || sample.contains("charset=\"tis620\"")
+        {
+            detected_encoding = Some(encoding_rs::WINDOWS_874);
+        }
+    }
+
+    let raw_html = if let Some(encoding) = detected_encoding {
+        let (cow, _, _) = encoding.decode(&bytes);
+        cow.into_owned()
+    } else {
+        // Default to UTF-8 with lossy fallback
+        let (cow, _, had_errors) = encoding_rs::UTF_8.decode(&bytes);
+        if had_errors {
+            // If UTF-8 had replacement errors and HTML indicates Thai, try Windows-874
+            let sample = cow.to_lowercase();
+            if sample.contains("windows-874") || sample.contains("tis-620") || sample.contains("thailand") {
+                let (thai_cow, _, _) = encoding_rs::WINDOWS_874.decode(&bytes);
+                thai_cow.into_owned()
+            } else {
+                cow.into_owned()
+            }
+        } else {
+            cow.into_owned()
+        }
+    };
 
     let title = extract_title(&raw_html, &cleaned_target_url);
     let normalized_html = normalize_tables_for_htmd(&raw_html);
