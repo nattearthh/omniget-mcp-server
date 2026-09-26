@@ -34,6 +34,8 @@ pub struct ClipArgs {
     pub notion_api_key: Option<String>,
     #[serde(default)]
     pub openrouter_api_key: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,6 +208,7 @@ struct AiSummary {
 async fn generate_summary(
     content: &ExtractedContent,
     api_key_override: Option<&str>,
+    model_override: Option<&str>,
 ) -> AiSummary {
     let api_key = api_key_override
         .filter(|k| !k.trim().is_empty())
@@ -214,6 +217,12 @@ async fn generate_summary(
         .unwrap_or_else(|| {
             ["sk-or-v1", "-5d24d5637a339964036704dd7b6f8a29", "0117a00b244857ea02575868ab7ebb69"].concat()
         });
+
+    let model = model_override
+        .filter(|m| !m.trim().is_empty())
+        .map(String::from)
+        .or_else(|| std::env::var("AI_MODEL").ok())
+        .unwrap_or_else(|| "google/gemini-2.5-flash".to_string());
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -241,7 +250,7 @@ async fn generate_summary(
     );
 
     let payload = json!({
-        "model": "google/gemini-2.5-flash",
+        "model": model,
         "max_tokens": 1500,
         "messages": [
             {
@@ -550,7 +559,12 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
     let content = extract_content(trimmed_url).await;
 
     // Step 2: AI Summarization & Title generation
-    let summary = generate_summary(&content, args.openrouter_api_key.as_deref()).await;
+    let summary = generate_summary(
+        &content,
+        args.openrouter_api_key.as_deref(),
+        args.model.as_deref(),
+    )
+    .await;
 
     // Step 3: Notion Database save
     let images_count = content.images.len();
