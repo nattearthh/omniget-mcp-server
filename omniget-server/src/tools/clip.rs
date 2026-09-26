@@ -231,17 +231,31 @@ async fn generate_summary(
 
     let truncated_text: String = content.raw_text.chars().take(12000).collect();
     let prompt = format!(
-        "You are an expert research analyst and knowledge manager.\n\
-        Analyze and summarize this content from {}.\n\
+        "You are an elite research analyst and Notion knowledge architect.\n\
+        Create a beautiful, highly structured executive briefing in Thai based on this content from {}.\n\
         Author/Source: {}\n\
         Original Title/URL: {}\n\n\
         --- CONTENT ---\n\
         {}\n\
         --- END CONTENT ---\n\n\
-        Return ONLY valid JSON matching this exact structure with no extra text or markdown formatting:\n\
+        Structure the summary using these exact 4 aesthetic sections with clean Markdown formatting and emojis:\n\
+        \n\
+        🎯 **สรุปภาพรวม (Executive Summary)**\n\
+        - (2-3 bullet points summarizing the core story or purpose)\n\
+        \n\
+        🔍 **ประเด็นสำคัญและข้อมูลเชิงลึก (Key Highlights)**\n\
+        - (bullet points detailing vital facts, data, tips, or evidence)\n\
+        \n\
+        🚀 **สิ่งที่นำไปปรับใช้ได้จริง / ข้อคิด (Actionable Takeaways)**\n\
+        - (practical advice, insights, or action points for the reader)\n\
+        \n\
+        🏷️ **แท็กหัวข้อ (Topics & Keywords)**\n\
+        `#Keyword1` `#Keyword2` `#Keyword3`\n\
+        \n\
+        Return ONLY valid JSON matching this exact structure with no extra text or code blocks:\n\
         {{\n\
-          \"title\": \"A concise, engaging title in Thai (or content's language) describing the main topic\",\n\
-          \"summary\": \"Executive summary in Thai using clean Markdown bullet points (- ...) covering key insights, core data, and practical takeaways\"\n\
+          \"title\": \"A concise, engaging title in Thai with an appropriate leading emoji (e.g. 🩺, 📱, 📊, 🚀, 💡)\",\n\
+          \"summary\": \"The full aesthetic 4-section briefing in Thai as instructed above\"\n\
         }}",
         content.platform,
         content.author.as_deref().unwrap_or("Unknown"),
@@ -417,7 +431,82 @@ async fn save_to_notion(
     // Build Page Children Blocks
     let mut children: Vec<Value> = Vec::new();
 
-    // 1. Executive Summary Callout Block with 💡 icon
+    // 1. Source & Metadata Badge Callout
+    let platform_icon = if content.platform.contains("Facebook") {
+        "📘"
+    } else if content.platform.contains("Instagram") {
+        "📸"
+    } else if content.platform.contains("X") || content.platform.contains("Twitter") {
+        "🐦"
+    } else {
+        "🌐"
+    };
+
+    let author_text = content.author.as_deref().unwrap_or("เนื้อหาจากเว็บไซต์");
+
+    children.push(json!({
+        "object": "block",
+        "type": "callout",
+        "callout": {
+            "icon": {
+                "type": "emoji",
+                "emoji": platform_icon
+            },
+            "color": "gray_background",
+            "rich_text": [
+                {
+                    "type": "text",
+                    "text": {
+                        "content": format!("📌 ที่มา: {}  •  ผู้เผยแพร่: {}  |  ", content.platform, author_text)
+                    },
+                    "annotations": {
+                        "bold": false
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": {
+                        "content": "🔗 เปิดดูโพสต์ต้นฉบับ",
+                        "link": {
+                            "url": &content.source_url
+                        }
+                    },
+                    "annotations": {
+                        "bold": true,
+                        "underline": true
+                    }
+                }
+            ]
+        }
+    }));
+
+    // 2. Divider
+    children.push(json!({
+        "object": "block",
+        "type": "divider",
+        "divider": {}
+    }));
+
+    // 3. Executive Briefing Section Header
+    children.push(json!({
+        "object": "block",
+        "type": "heading_2",
+        "heading_2": {
+            "rich_text": [
+                {
+                    "type": "text",
+                    "text": {
+                        "content": "💡 สรุปประเด็นสำคัญ (Executive Briefing)"
+                    },
+                    "annotations": {
+                        "bold": true
+                    }
+                }
+            ]
+        }
+    }));
+
+    // 4. Executive Summary Callout Block with 💡 icon
     let summary_chunks = chunk_text(&summary.summary, 1900);
     let summary_rich_text: Vec<Value> = summary_chunks
         .into_iter()
@@ -439,20 +528,43 @@ async fn save_to_notion(
                 "type": "emoji",
                 "emoji": "💡"
             },
+            "color": "yellow_background",
             "rich_text": summary_rich_text
         }
     }));
 
-    // 2. Divider
-    children.push(json!({
-        "object": "block",
-        "type": "divider",
-        "divider": {}
-    }));
+    // 5. Extracted High-Resolution Images (Rendered natively as Notion Image blocks)
+    let valid_images: Vec<&String> = content.images.iter()
+        .filter(|img| img.starts_with("http://") || img.starts_with("https://"))
+        .take(10)
+        .collect();
 
-    // 3. Extracted High-Resolution Images (Rendered natively as Notion Image blocks)
-    for img_url in content.images.iter().take(10) {
-        if img_url.starts_with("http://") || img_url.starts_with("https://") {
+    if !valid_images.is_empty() {
+        children.push(json!({
+            "object": "block",
+            "type": "divider",
+            "divider": {}
+        }));
+
+        children.push(json!({
+            "object": "block",
+            "type": "heading_2",
+            "heading_2": {
+                "rich_text": [
+                    {
+                        "type": "text",
+                        "text": {
+                            "content": format!("🖼️ รูปภาพประกอบ ({})", valid_images.len())
+                        },
+                        "annotations": {
+                            "bold": true
+                        }
+                    }
+                ]
+            }
+        }));
+
+        for img_url in valid_images {
             children.push(json!({
                 "object": "block",
                 "type": "image",
@@ -466,42 +578,54 @@ async fn save_to_notion(
         }
     }
 
-    // 4. Raw Full Text Section Header
+    // 6. Collapsible Raw Content in a Toggle Block
     children.push(json!({
         "object": "block",
-        "type": "heading_2",
-        "heading_2": {
+        "type": "divider",
+        "divider": {}
+    }));
+
+    let raw_chunks = chunk_text(&content.raw_text, 1900);
+    let raw_paragraph_blocks: Vec<Value> = raw_chunks
+        .into_iter()
+        .take(50)
+        .map(|chunk| {
+            json!({
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [
+                        {
+                            "type": "text",
+                            "text": {
+                                "content": chunk
+                            }
+                        }
+                    ]
+                }
+            })
+        })
+        .collect();
+
+    children.push(json!({
+        "object": "block",
+        "type": "toggle",
+        "toggle": {
+            "color": "gray_background",
             "rich_text": [
                 {
                     "type": "text",
                     "text": {
-                        "content": "📝 Raw Content / ข้อมูลดิบ"
+                        "content": "📂 กดเพื่อดูเนื้อหาต้นฉบับฉบับเต็ม (Full Content & Captions)"
+                    },
+                    "annotations": {
+                        "bold": true
                     }
                 }
-            ]
+            ],
+            "children": raw_paragraph_blocks
         }
     }));
-
-    // 5. Raw Content Paragraphs (chunked every 1,900 chars to avoid Notion limits)
-    let raw_chunks = chunk_text(&content.raw_text, 1900);
-    // Notion page creation allows max 100 blocks total
-    let max_initial_raw_blocks = 80_usize.saturating_sub(children.len());
-    for chunk in raw_chunks.into_iter().take(max_initial_raw_blocks) {
-        children.push(json!({
-            "object": "block",
-            "type": "paragraph",
-            "paragraph": {
-                "rich_text": [
-                    {
-                        "type": "text",
-                        "text": {
-                            "content": chunk
-                        }
-                    }
-                ]
-            }
-        }));
-    }
 
     let payload = json!({
         "parent": {
