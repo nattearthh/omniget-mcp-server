@@ -710,26 +710,47 @@ async fn save_to_notion(
     }));
 
     let raw_chunks = chunk_text(&content.raw_text, 1900);
-    let raw_paragraph_blocks: Vec<Value> = raw_chunks
-        .into_iter()
-        .take(50)
-        .map(|chunk| {
-            json!({
-                "object": "block",
-                "type": "paragraph",
-                "paragraph": {
-                    "rich_text": [
-                        {
-                            "type": "text",
-                            "text": {
-                                "content": chunk
+    let mut raw_paragraph_blocks: Vec<Value> = Vec::new();
+
+    for chunk in raw_chunks.into_iter().take(50) {
+        // If the chunk is a standalone markdown image: ![alt](url)
+        if let Some(caps) = IMG_MD_REGEX.captures(chunk.trim()) {
+            if let Some(m) = caps.get(1) {
+                let img_url = m.as_str();
+                if (img_url.starts_with("http://") || img_url.starts_with("https://"))
+                    && !img_url.contains("lookaside.fbsbx.com")
+                    && !img_url.contains("static.xx.fbcdn.net")
+                {
+                    raw_paragraph_blocks.push(json!({
+                        "object": "block",
+                        "type": "image",
+                        "image": {
+                            "type": "external",
+                            "external": {
+                                "url": img_url
                             }
                         }
-                    ]
+                    }));
+                    continue;
                 }
-            })
-        })
-        .collect();
+            }
+        }
+
+        raw_paragraph_blocks.push(json!({
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {
+                "rich_text": [
+                    {
+                        "type": "text",
+                        "text": {
+                            "content": chunk
+                        }
+                    }
+                ]
+            }
+        }));
+    }
 
     children.push(json!({
         "object": "block",
@@ -751,13 +772,26 @@ async fn save_to_notion(
         }
     }));
 
-    let payload = json!({
+    let cover_payload = valid_images.first().map(|img_url| {
+        json!({
+            "type": "external",
+            "external": {
+                "url": *img_url
+            }
+        })
+    });
+
+    let mut payload = json!({
         "parent": {
             "database_id": db_id
         },
         "properties": properties,
         "children": children
     });
+
+    if let Some(cover) = cover_payload {
+        payload["cover"] = cover;
+    }
 
     let res = client
         .post("https://api.notion.com/v1/pages")
