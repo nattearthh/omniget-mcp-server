@@ -16,7 +16,8 @@ use crate::tools::{
     facebook_post::extract_facebook_post,
     instagram_post::extract_instagram_post,
     web_markdown::web_to_markdown,
-    x_extract::extract_post,
+    x_extract::extract_thread,
+    pdf_text::{extract_pdf_text, PdfTextArgs},
 };
 
 static IMG_MD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
@@ -70,29 +71,40 @@ async fn extract_content(url: &str) -> ExtractedContent {
 
     // 1. Twitter / X
     if lower.contains("x.com") || lower.contains("twitter.com") {
-        match extract_post(url).await {
-            Ok(post) => {
-                let images: Vec<String> = post
-                    .media
-                    .into_iter()
-                    .filter(|m| m.kind == "photo" && !m.url.is_empty())
-                    .map(|m| m.url)
-                    .collect();
-                let author_str = format!("{} (@{})", post.author.name, post.author.handle);
-                let title = if post.text.chars().count() > 60 {
-                    format!("{}...", post.text.chars().take(57).collect::<String>())
-                } else if !post.text.is_empty() {
-                    post.text.clone()
+        match extract_thread(url).await {
+            Ok(thread) => {
+                let mut images = Vec::new();
+                let mut full_text = String::new();
+                for (i, post) in thread.posts.iter().enumerate() {
+                    for m in &post.media {
+                        let img = if m.kind == "photo" { m.url.clone() } else { m.thumb.clone() };
+                        if !img.is_empty() {
+                            images.push(img);
+                        }
+                    }
+                    if thread.posts.len() > 1 {
+                        full_text.push_str(&format!("--- Tweet {} by @{} ---\n{}\n\n", i + 1, post.author.handle, post.text));
+                    } else {
+                        full_text.push_str(&post.text);
+                    }
+                }
+                
+                let author_str = format!("{} (@{})", thread.focal.author.name, thread.focal.author.handle);
+                let title = if thread.focal.text.chars().count() > 60 {
+                    format!("{}...", thread.focal.text.chars().take(57).collect::<String>())
+                } else if !thread.focal.text.is_empty() {
+                    thread.focal.text.clone()
                 } else {
-                    format!("X Post by @{}", post.author.handle)
+                    format!("X Post by @{}", thread.focal.author.handle)
                 };
+                
                 return ExtractedContent {
                     platform: "X (Twitter)".to_string(),
                     title,
                     author: Some(author_str),
-                    raw_text: post.text,
+                    raw_text: full_text.trim().to_string(),
                     images,
-                    source_url: post.url,
+                    source_url: thread.focal.url.clone(),
                 };
             }
             Err(e) => {
@@ -166,6 +178,31 @@ async fn extract_content(url: &str) -> ExtractedContent {
             }
             Err(e) => {
                 tracing::warn!("Facebook extraction failed ({}), falling back to web markdown", e);
+            }
+        }
+    }
+
+    // 3.5 PDF Documents
+    if lower.ends_with(".pdf") || lower.contains(".pdf?") {
+        match extract_pdf_text(PdfTextArgs {
+            path: Some(url.to_string()),
+            url: None,
+            pages: None,
+        }).await {
+            Ok(pdf_result) => {
+                let filename = url.rsplit('/').next().unwrap_or("Document.pdf").split('?').next().unwrap_or("Document.pdf");
+                let title = format!("PDF Document: {}", filename);
+                return ExtractedContent {
+                    platform: "PDF Document".to_string(),
+                    title,
+                    author: None,
+                    raw_text: pdf_result.text,
+                    images: Vec::new(),
+                    source_url: url.to_string(),
+                };
+            }
+            Err(e) => {
+                tracing::warn!("PDF extraction failed ({}), falling back to web markdown", e);
             }
         }
     }
@@ -652,13 +689,11 @@ async fn save_to_notion(
     }));
 
     // 5. Extracted High-Resolution Images (Rendered natively as Notion Image blocks)
-    // Exclude Facebook lookaside / static CDN urls that block external hotlinking and cause broken image blocks in Notion
+    // Facebook lookaside URLs are now resolved to scontent CDN URLs upstream in facebook_post.rs
     let valid_images: Vec<&String> = content.images.iter()
         .filter(|img| {
             let s = img.as_str();
-            (s.starts_with("http://") || s.starts_with("https://"))
-                && !s.contains("lookaside.fbsbx.com")
-                && !s.contains("static.xx.fbcdn.net")
+            s.starts_with("http://") || s.starts_with("https://")
         })
         .take(10)
         .collect();
@@ -717,9 +752,7 @@ async fn save_to_notion(
         if let Some(caps) = IMG_MD_REGEX.captures(chunk.trim()) {
             if let Some(m) = caps.get(1) {
                 let img_url = m.as_str();
-                if (img_url.starts_with("http://") || img_url.starts_with("https://"))
-                    && !img_url.contains("lookaside.fbsbx.com")
-                    && !img_url.contains("static.xx.fbcdn.net")
+                if img_url.starts_with("http://") || img_url.starts_with("https://")
                 {
                     raw_paragraph_blocks.push(json!({
                         "object": "block",

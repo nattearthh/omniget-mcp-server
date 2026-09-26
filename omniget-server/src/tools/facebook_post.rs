@@ -140,7 +140,7 @@ static FB_DASH_DIRECT_AUDIO_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 
 static SCONTENT_IMAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"https://scontent[^"'\s<>]+\.(?:jpg|png|webp)[^"'\s<>]*"#)
+    Regex::new(r#"https:(?:\\?/){2}scontent[^"'\s<>]+\.(?:jpg|png|webp)[^"'\s<>]*"#)
         .expect("Valid scontent image extraction regex")
 });
 
@@ -1463,6 +1463,67 @@ pub fn extract_attached_images_from_html(html: &str, primary_image: Option<&str>
     images
 }
 
+/// Resolves `lookaside.fbsbx.com` image URLs by following their HTTP redirects
+/// to obtain the actual `scontent.xx.fbcdn.net` CDN URLs that Notion can embed.
+///
+/// Facebook's `og:image` tags often point to `lookaside.fbsbx.com` proxy URLs
+/// which return 403 Forbidden when Notion tries to render them. However, these
+/// URLs redirect (302) to `scontent` CDN URLs when fetched server-side.
+pub async fn resolve_lookaside_images(
+    client: &reqwest::Client,
+    images: &[String],
+) -> Vec<String> {
+    let mut resolved = Vec::new();
+
+    for img in images {
+        if img.contains("lookaside.fbsbx.com") || img.contains("static.xx.fbcdn.net") {
+            // Follow redirect to get the actual scontent URL
+            match client
+                .get(img)
+                .header("User-Agent", FB_CRAWLER_USER_AGENT)
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    let final_url = resp.url().as_str().to_string();
+                    if final_url.contains("scontent") {
+                        tracing::debug!(
+                            "[facebook] Resolved lookaside image: {} -> {}",
+                            img, final_url
+                        );
+                        if !resolved.contains(&final_url) {
+                            resolved.push(final_url);
+                        }
+                    } else {
+                        tracing::debug!(
+                            "[facebook] Lookaside redirect did not yield scontent URL: {} -> {}",
+                            img, final_url
+                        );
+                        // Still include it as a last resort; Notion might handle it
+                        if !resolved.contains(&final_url) {
+                            resolved.push(final_url);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "[facebook] Failed to resolve lookaside image {}: {}",
+                        img, e
+                    );
+                    // Skip unresolvable URLs
+                }
+            }
+        } else {
+            // Non-lookaside URL (already a scontent URL or external)
+            if !resolved.contains(img) {
+                resolved.push(img.clone());
+            }
+        }
+    }
+
+    resolved
+}
+
 // ── HTTP Client & Redirect Resolution ────────────────────────────────────────
 
 /// Builds the reqwest HTTP client configured with crawler headers, 15s timeout, and redirect following.
@@ -2187,7 +2248,10 @@ pub async fn extract_facebook_post(input: &str) -> Result<FacebookPost, Facebook
     }
 
     // Step 5: Extract attached images & maximize resolution
-    let images = extract_attached_images_from_html(&html, og.image.as_deref());
+    let raw_images = extract_attached_images_from_html(&html, og.image.as_deref());
+
+    // Step 5.5: Resolve lookaside.fbsbx.com URLs → scontent CDN URLs for Notion compatibility
+    let images = resolve_lookaside_images(&client, &raw_images).await;
 
     // Step 6: Assemble Author Information
     let author_name = if let Some(ref title) = og.title {
