@@ -407,10 +407,7 @@ async fn save_to_notion(
         .map_err(|e| e.to_string())?;
 
     // Build Notion page properties matching user's database schema:
-    // Name (title), URL (url), Summary (rich_text), Text (rich_text)
-    let summary_prop_text: String = summary.summary.chars().take(1950).collect();
-    let text_prop_text: String = content.raw_text.chars().take(1950).collect();
-
+    // Name, Platform, URL, Tags, Author, Priority, Category, Status
     let platform_tag = if content.platform.contains("Facebook") {
         "📘 Facebook"
     } else if content.platform.contains("Instagram") {
@@ -472,24 +469,6 @@ async fn save_to_notion(
         },
         "Tags": {
             "multi_select": tags_array
-        },
-        "Summary": {
-            "rich_text": [
-                {
-                    "text": {
-                        "content": summary_prop_text
-                    }
-                }
-            ]
-        },
-        "Text": {
-            "rich_text": [
-                {
-                    "text": {
-                        "content": text_prop_text
-                    }
-                }
-            ]
         }
     });
 
