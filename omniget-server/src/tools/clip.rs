@@ -202,6 +202,9 @@ async fn extract_content(url: &str) -> ExtractedContent {
 struct AiSummary {
     title: String,
     summary: String,
+    category: String,
+    priority: String,
+    tags: Vec<String>,
 }
 
 /// Generates executive summary and title using OpenRouter.
@@ -232,30 +235,19 @@ async fn generate_summary(
     let truncated_text: String = content.raw_text.chars().take(12000).collect();
     let prompt = format!(
         "You are an elite research analyst and Notion knowledge architect.\n\
-        Create a beautiful, highly structured executive briefing in Thai based on this content from {}.\n\
+        Analyze and classify this content from {}.\n\
         Author/Source: {}\n\
         Original Title/URL: {}\n\n\
         --- CONTENT ---\n\
         {}\n\
         --- END CONTENT ---\n\n\
-        Structure the summary using these exact 4 aesthetic sections with clean Markdown formatting and emojis:\n\
-        \n\
-        🎯 **สรุปภาพรวม (Executive Summary)**\n\
-        - (2-3 bullet points summarizing the core story or purpose)\n\
-        \n\
-        🔍 **ประเด็นสำคัญและข้อมูลเชิงลึก (Key Highlights)**\n\
-        - (bullet points detailing vital facts, data, tips, or evidence)\n\
-        \n\
-        🚀 **สิ่งที่นำไปปรับใช้ได้จริง / ข้อคิด (Actionable Takeaways)**\n\
-        - (practical advice, insights, or action points for the reader)\n\
-        \n\
-        🏷️ **แท็กหัวข้อ (Topics & Keywords)**\n\
-        `#Keyword1` `#Keyword2` `#Keyword3`\n\
-        \n\
-        Return ONLY valid JSON matching this exact structure with no extra text or code blocks:\n\
+        Return ONLY valid JSON matching this exact structure with no extra text or code fences:\n\
         {{\n\
           \"title\": \"A concise, engaging title in Thai with an appropriate leading emoji (e.g. 🩺, 📱, 📊, 🚀, 💡)\",\n\
-          \"summary\": \"The full aesthetic 4-section briefing in Thai as instructed above\"\n\
+          \"category\": \"Choose EXACTLY ONE from: 💻 ไอที / เทคโนโลยี | 🤖 ปัญญาประดิษฐ์ (AI) | 💼 ธุรกิจ / การเงิน | 📰 ข่าวสาร | 📚 ความรู้ / วิชาการ | 🩺 สุขภาพ / การแพทย์ | ☕ ทั่วไป / ไลฟ์สไตล์\",\n\
+          \"priority\": \"Choose EXACTLY ONE from: 🔴 สูง (High) | 🟡 ปานกลาง (Medium) | 🟢 ต่ำ (Low)\",\n\
+          \"tags\": [\"Keyword1\", \"Keyword2\", \"Keyword3\"],\n\
+          \"summary\": \"The full aesthetic 4-section briefing in Thai with:\\n\\n🎯 **สรุปภาพรวม (Executive Summary)**\\n- ...\\n\\n🔍 **ประเด็นสำคัญและข้อมูลเชิงลึก (Key Highlights)**\\n- ...\\n\\n🚀 **สิ่งที่นำไปปรับใช้ได้จริง / ข้อคิด (Actionable Insights)**\\n- ...\\n\\n🏷️ **แท็กหัวข้อ (Topics & Keywords)**\\n`#Keyword1` `#Keyword2`\"\n\
         }}",
         content.platform,
         content.author.as_deref().unwrap_or("Unknown"),
@@ -304,10 +296,31 @@ async fn generate_summary(
                             .filter(|s| !s.trim().is_empty())
                             .unwrap_or(&content.raw_text)
                             .to_string();
+                        let ai_category = parsed["category"]
+                            .as_str()
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or("☕ ทั่วไป / ไลฟ์สไตล์")
+                            .to_string();
+                        let ai_priority = parsed["priority"]
+                            .as_str()
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or("🟡 ปานกลาง (Medium)")
+                            .to_string();
+                        let ai_tags: Vec<String> = parsed["tags"]
+                            .as_array()
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.trim_start_matches('#').to_string()))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
 
                         return AiSummary {
                             title: ai_title,
                             summary: ai_summary,
+                            category: ai_category,
+                            priority: ai_priority,
+                            tags: ai_tags,
                         };
                     }
                 }
@@ -325,6 +338,9 @@ async fn generate_summary(
     AiSummary {
         title: content.title.clone(),
         summary: fallback_summary,
+        category: "☕ ทั่วไป / ไลฟ์สไตล์".to_string(),
+        priority: "🟡 ปานกลาง (Medium)".to_string(),
+        tags: Vec::new(),
     }
 }
 
@@ -395,6 +411,23 @@ async fn save_to_notion(
     let summary_prop_text: String = summary.summary.chars().take(1950).collect();
     let text_prop_text: String = content.raw_text.chars().take(1950).collect();
 
+    let platform_tag = if content.platform.contains("Facebook") {
+        "📘 Facebook"
+    } else if content.platform.contains("Instagram") {
+        "📸 Instagram"
+    } else if content.platform.contains("X") || content.platform.contains("Twitter") {
+        "🐦 X (Twitter)"
+    } else {
+        "🌐 Web Article"
+    };
+
+    let author_text = content.author.as_deref().unwrap_or("เนื้อหาจากเว็บไซต์");
+
+    let tags_array: Vec<Value> = summary.tags.iter()
+        .take(5)
+        .map(|t| json!({ "name": t }))
+        .collect();
+
     let properties = json!({
         "Name": {
             "title": [
@@ -407,6 +440,38 @@ async fn save_to_notion(
         },
         "URL": {
             "url": content.source_url
+        },
+        "Platform": {
+            "select": {
+                "name": platform_tag
+            }
+        },
+        "Category": {
+            "select": {
+                "name": summary.category
+            }
+        },
+        "Priority": {
+            "select": {
+                "name": summary.priority
+            }
+        },
+        "Status": {
+            "select": {
+                "name": "📥 ยังไม่ได้อ่าน"
+            }
+        },
+        "Author": {
+            "rich_text": [
+                {
+                    "text": {
+                        "content": author_text
+                    }
+                }
+            ]
+        },
+        "Tags": {
+            "multi_select": tags_array
         },
         "Summary": {
             "rich_text": [
@@ -442,7 +507,6 @@ async fn save_to_notion(
         "🌐"
     };
 
-    let author_text = content.author.as_deref().unwrap_or("เนื้อหาจากเว็บไซต์");
 
     children.push(json!({
         "object": "block",
