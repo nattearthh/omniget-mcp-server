@@ -485,7 +485,7 @@ async fn save_to_notion(
     // 5. Raw Content Paragraphs (chunked every 1,900 chars to avoid Notion limits)
     let raw_chunks = chunk_text(&content.raw_text, 1900);
     // Notion page creation allows max 100 blocks total
-    let max_initial_raw_blocks = 80.saturating_sub(children.len());
+    let max_initial_raw_blocks = 80_usize.saturating_sub(children.len());
     for chunk in raw_chunks.into_iter().take(max_initial_raw_blocks) {
         children.push(json!({
             "object": "block",
