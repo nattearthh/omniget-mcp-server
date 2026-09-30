@@ -823,7 +823,8 @@ async fn save_to_notion(
             let is_fb_cdn = img.contains("lookaside.fbsbx.com")
                 || img.contains("fbcdn.net")
                 || img.contains("fbsbx.com")
-                || img.contains("cdninstagram.com");
+                || img.contains("cdninstagram.com")
+                || img.contains("instagram.com");
 
             if is_fb_cdn {
                 let encoded: String = url::form_urlencoded::byte_serialize(img.as_bytes()).collect();
@@ -893,7 +894,8 @@ async fn save_to_notion(
                     let is_fb_cdn = img_url.contains("lookaside.fbsbx.com")
                         || img_url.contains("fbcdn.net")
                         || img_url.contains("fbsbx.com")
-                        || img_url.contains("cdninstagram.com");
+                        || img_url.contains("cdninstagram.com")
+                        || img_url.contains("instagram.com");
 
                     let final_img_url = if is_fb_cdn {
                         let encoded: String = url::form_urlencoded::byte_serialize(img_url.as_bytes()).collect();

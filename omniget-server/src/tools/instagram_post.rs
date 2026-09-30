@@ -644,7 +644,7 @@ pub fn select_highest_resolution_image(node: &Value) -> Option<String> {
             .max_by_key(|(_, area)| *area);
 
         if let Some((src, _)) = best {
-            return Some(src.to_string());
+            return Some(clean_media_url(src));
         }
     }
 
@@ -665,14 +665,14 @@ pub fn select_highest_resolution_image(node: &Value) -> Option<String> {
             .max_by_key(|(_, area)| *area);
 
         if let Some((url, _)) = best {
-            return Some(url.to_string());
+            return Some(clean_media_url(url));
         }
     }
 
     // 3. Fallback to display_url
     node.get("display_url")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(clean_media_url)
 }
 
 /// Helper to parse DASH MPD manifest and extract audio stream BaseURL
@@ -1601,13 +1601,13 @@ pub fn parse_embed_html(html: &str, shortcode: &str) -> Result<InstagramPost, In
     let img_url = img_re
         .and_then(|r| r.captures(html))
         .and_then(|c| c.get(1))
-        .map(|m| m.as_str().to_string());
+        .map(|m| clean_media_url(m.as_str()));
 
     let vid_re = Regex::new(r#"<video[^>]+src="([^"]+)""#).ok();
     let vid_url = vid_re
         .and_then(|r| r.captures(html))
         .and_then(|c| c.get(1))
-        .map(|m| m.as_str().to_string());
+        .map(|m| clean_media_url(m.as_str()));
 
     let mut images = Vec::new();
     let mut videos = Vec::new();

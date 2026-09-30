@@ -1468,47 +1468,86 @@ pub async fn image_proxy_handler(req: Request) -> Response {
     use axum::http::header;
 
     let query_map = parse_query(&req);
-    let target_url = match query_map.get("url") {
+    let raw_target_url = match query_map.get("url") {
         Some(u) if !u.trim().is_empty() => u.trim(),
         _ => {
             return (StatusCode::BAD_REQUEST, "Missing 'url' query parameter").into_response();
         }
     };
 
+    // Clean any HTML entities from the target URL (&amp; -> &, \u0026 -> &)
+    let target_url = raw_target_url
+        .replace("&amp;", "&")
+        .replace(r"\u0026", "&");
+
     // SSRF / security check: only proxy Facebook/Instagram CDN image URLs
     let is_allowed = target_url.contains("fbsbx.com")
         || target_url.contains("fbcdn.net")
-        || target_url.contains("cdninstagram.com");
+        || target_url.contains("cdninstagram.com")
+        || target_url.contains("instagram.com");
 
     if !is_allowed {
         return (StatusCode::FORBIDDEN, "Forbidden proxy target").into_response();
     }
+
+    let is_instagram = target_url.contains("instagram.com") || target_url.contains("cdninstagram.com");
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .unwrap_or_default();
 
-    // 1st attempt: with Facebook Crawler UA
-    let mut resp = client
-        .get(target_url)
-        .header(header::USER_AGENT, "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)")
-        .header(header::ACCEPT, "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
-        .send()
-        .await;
+    let browser_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+    let fb_crawler_ua = "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)";
 
-    // 2nd attempt: if 1st failed or returned non-success, retry with browser UA and FB referer
+    // Attempt 1: For Instagram use Instagram Referer + Browser UA; for Facebook use Crawler UA
+    let (ua_1, referer_1) = if is_instagram {
+        (browser_ua, Some("https://www.instagram.com/"))
+    } else {
+        (fb_crawler_ua, None)
+    };
+
+    let mut req_builder = client
+        .get(&target_url)
+        .header(header::USER_AGENT, ua_1)
+        .header(header::ACCEPT, "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8");
+    if let Some(ref_val) = referer_1 {
+        req_builder = req_builder.header(header::REFERER, ref_val);
+    }
+    let mut resp = req_builder.send().await;
+
+    // Attempt 2: If attempt 1 failed or returned non-200, try browser UA with NO referer
     if resp.as_ref().map(|r| !r.status().is_success()).unwrap_or(true) {
         if let Ok(retry_resp) = client
-            .get(target_url)
-            .header(header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
+            .get(&target_url)
+            .header(header::USER_AGENT, browser_ua)
             .header(header::ACCEPT, "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
-            .header(header::REFERER, "https://www.facebook.com/")
             .send()
             .await
         {
             if retry_resp.status().is_success() {
                 resp = Ok(retry_resp);
+            }
+        }
+    }
+
+    // Attempt 3: If still non-200, try opposite UA strategy
+    if resp.as_ref().map(|r| !r.status().is_success()).unwrap_or(true) {
+        let (ua_3, referer_3) = if is_instagram {
+            (fb_crawler_ua, None)
+        } else {
+            (browser_ua, Some("https://www.facebook.com/"))
+        };
+        let mut req_builder3 = client
+            .get(&target_url)
+            .header(header::USER_AGENT, ua_3)
+            .header(header::ACCEPT, "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8");
+        if let Some(ref_val) = referer_3 {
+            req_builder3 = req_builder3.header(header::REFERER, ref_val);
+        }
+        if let Ok(retry_resp3) = req_builder3.send().await {
+            if retry_resp3.status().is_success() {
+                resp = Ok(retry_resp3);
             }
         }
     }
