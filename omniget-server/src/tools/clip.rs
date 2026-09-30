@@ -51,6 +51,8 @@ pub struct ClipResponse {
     pub summary: String,
     pub ai_ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ai_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -246,6 +248,7 @@ struct AiSummary {
     priority: String,
     tags: Vec<String>,
     ai_ok: bool,
+    ai_model: Option<String>,
     ai_error: Option<String>,
 }
 
@@ -443,6 +446,7 @@ async fn generate_summary(
                                     priority: ai_priority,
                                     tags: ai_tags,
                                     ai_ok: true,
+                                    ai_model: Some(format!("{}: {}", if is_groq { "Groq" } else { "OpenRouter" }, model)),
                                     ai_error: None,
                                 };
                             } else if !content_str.trim().is_empty() && !content_str.trim().starts_with('{') {
@@ -455,6 +459,7 @@ async fn generate_summary(
                                     priority: "🟡 ปานกลาง (Medium)".to_string(),
                                     tags: Vec::new(),
                                     ai_ok: true,
+                                    ai_model: Some(format!("{}: {}", if is_groq { "Groq" } else { "OpenRouter" }, model)),
                                     ai_error: None,
                                 };
                             }
@@ -462,13 +467,13 @@ async fn generate_summary(
                     }
                 } else {
                     let err_detail = format!("Model {} HTTP {}", model, status);
-                    tracing::warn!("OpenRouter: {}", err_detail);
+                    tracing::warn!("AI: {}", err_detail);
                     last_ai_error = Some(err_detail);
                 }
             }
             Err(e) => {
                 let err_detail = format!("Model {} connection error: {}", model, e);
-                tracing::warn!("OpenRouter: {}", err_detail);
+                tracing::warn!("AI: {}", err_detail);
                 last_ai_error = Some(err_detail);
             }
         }
@@ -488,6 +493,7 @@ async fn generate_summary(
         priority: "🟡 ปานกลาง (Medium)".to_string(),
         tags: Vec::new(),
         ai_ok: false,
+        ai_model: None,
         ai_error: last_ai_error.or_else(|| Some("All AI candidates failed to respond".to_string())),
     }
 }
@@ -648,7 +654,12 @@ async fn save_to_notion(
                 {
                     "type": "text",
                     "text": {
-                        "content": format!("📌 ที่มา: {}  •  ผู้เผยแพร่: {}  |  ", content.platform, author_text)
+                        "content": format!(
+                            "📌 ที่มา: {}  •  ผู้เผยแพร่: {}  •  🤖 โมเดล: {}  |  ",
+                            content.platform,
+                            author_text,
+                            summary.ai_model.as_deref().unwrap_or("ไม่มี")
+                        )
                     },
                     "annotations": {
                         "bold": false
@@ -940,6 +951,7 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
             images_count,
             summary: summary.summary,
             ai_ok: summary.ai_ok,
+            ai_model: summary.ai_model,
             ai_error: summary.ai_error,
             error: None,
         },
@@ -953,6 +965,7 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
             images_count,
             summary: summary.summary,
             ai_ok: summary.ai_ok,
+            ai_model: summary.ai_model,
             ai_error: summary.ai_error,
             error: Some(err),
         },
