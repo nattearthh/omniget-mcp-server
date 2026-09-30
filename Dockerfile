@@ -15,8 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy repository source files (ARG before COPY busts layer cache on each Railway build)
-ARG CACHEBUST=1
+# Copy repository source files
 COPY . .
 
 # Build only the headless standalone server binary in release mode.

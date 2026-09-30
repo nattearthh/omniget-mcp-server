@@ -2,10 +2,7 @@
   "$schema": "https://railway.com/railway.schema.json",
   "build": {
     "builder": "DOCKERFILE",
-    "dockerfilePath": "Dockerfile",
-    "dockerBuildArgs": {
-      "CACHEBUST": "${{RAILWAY_DEPLOYMENT_ID}}"
-    }
+    "dockerfilePath": "Dockerfile"
   },
   "deploy": {
     "startCommand": "sh /app/start.sh",
@@ -15,3 +12,4 @@
     "restartPolicyMaxRetries": 10
   }
 }
+
