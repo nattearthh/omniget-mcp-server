@@ -1443,14 +1443,29 @@ pub fn extract_attached_images_from_html(html: &str, primary_image: Option<&str>
     for mat in SCONTENT_IMAGE_RE.find_iter(html) {
         let cleaned = clean_facebook_cdn_url(mat.as_str());
 
-        // Filter out small thumbnails, profile badges, and emojis
+        // Filter out small thumbnails, profile badges, avatars, and emojis
         let lower = cleaned.to_lowercase();
         if lower.contains("emoji.php")
             || lower.contains("static.xx")
+            || lower.contains("rsrc.php")
             || lower.contains("/p50x50/")
             || lower.contains("/s50x50/")
             || lower.contains("/p100x100/")
             || lower.contains("/s100x100/")
+            || lower.contains("/p160x160/")
+            || lower.contains("/s160x160/")
+            || lower.contains("/p200x200/")
+            || lower.contains("/s200x200/")
+            || lower.contains("/p320x320/")
+            || lower.contains("/s320x320/")
+            || lower.contains("/p480x480/")
+            || lower.contains("/s480x480/")
+            || lower.contains("-1/")
+            || lower.contains("/t1.0-1/")
+            || lower.contains("/t39.30808-1/")
+            || lower.contains("/t1.30497-1/")
+            || lower.contains("/t1.18169-1/")
+            || lower.contains("/c0.")
         {
             continue;
         }

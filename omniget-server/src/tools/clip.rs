@@ -271,33 +271,66 @@ async fn generate_summary(
     api_key_override: Option<&str>,
     model_override: Option<&str>,
 ) -> AiSummary {
-    let api_key = api_key_override
-        .filter(|k| !k.trim().is_empty())
-        .map(String::from)
-        .or_else(|| std::env::var("OPENROUTER_API_KEY").ok().filter(|k| !k.trim().is_empty()))
-        .unwrap_or_else(|| {
-            ["sk-or-v1", "-5d24d5637a339964036704dd7b6f8a29", "0117a00b244857ea02575868ab7ebb69"].concat()
-        });
+    let groq_env = std::env::var("GROQ_API_KEY").ok().filter(|k| !k.trim().is_empty());
+    let openrouter_env = std::env::var("OPENROUTER_API_KEY").ok().filter(|k| !k.trim().is_empty());
 
-    let primary_model = model_override
-        .filter(|m| !m.trim().is_empty())
-        .map(String::from)
-        .or_else(|| std::env::var("AI_MODEL").ok().filter(|m| !m.trim().is_empty()))
-        .unwrap_or_else(|| "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free".to_string());
+    let (api_key, is_groq) = if let Some(k) = api_key_override.filter(|k| !k.trim().is_empty()) {
+        let is_g = k.starts_with("gsk_");
+        (k.to_string(), is_g)
+    } else if let Some(k) = groq_env {
+        (k, true)
+    } else if let Some(k) = openrouter_env {
+        (k, false)
+    } else {
+        (String::new(), true)
+    };
 
-    let candidate_models = vec![
-        primary_model,
-        "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free".to_string(),
-        "nvidia/nemotron-3.5-lightning:free".to_string(),
-        "qwen/qwen3.8-27b:free".to_string(),
-    ];
+    let api_endpoint = if is_groq {
+        "https://api.groq.com/openai/v1/chat/completions"
+    } else {
+        "https://openrouter.ai/api/v1/chat/completions"
+    };
+
+    let env_model = std::env::var("AI_MODEL").ok().filter(|m| !m.trim().is_empty());
+    let candidate_models = if is_groq {
+        // If env_model contains '/' it's an old OpenRouter model like google/gemma, ignore it on Groq
+        let valid_primary = model_override
+            .filter(|m| !m.trim().is_empty() && !m.contains('/'))
+            .or_else(|| env_model.as_deref().filter(|m| !m.contains('/')))
+            .unwrap_or("llama-3.3-70b-versatile");
+
+        let mut models = vec![valid_primary.to_string()];
+        for fallback in &["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gemma2-9b-it"] {
+            if !models.contains(&fallback.to_string()) {
+                models.push(fallback.to_string());
+            }
+        }
+        models
+    } else {
+        let primary = model_override
+            .filter(|m| !m.trim().is_empty())
+            .or(env_model.as_deref())
+            .unwrap_or("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free");
+
+        let mut models = vec![primary.to_string()];
+        for fallback in &[
+            "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+            "nvidia/nemotron-3.5-lightning:free",
+            "qwen/qwen3.8-27b:free",
+        ] {
+            if !models.contains(&fallback.to_string()) {
+                models.push(fallback.to_string());
+            }
+        }
+        models
+    };
 
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(35))
+        .timeout(Duration::from_secs(20))
         .build()
         .unwrap_or_default();
 
-    let truncated_text: String = content.raw_text.chars().take(10000).collect();
+    let truncated_text: String = content.raw_text.chars().take(6000).collect();
     let prompt = format!(
         "Analyze, summarize, and classify this content from {}.\n\
         Author/Source: {}\n\
@@ -322,13 +355,10 @@ async fn generate_summary(
     let mut last_ai_error: Option<String> = None;
 
     for model in candidate_models {
-        tracing::info!("Calling OpenRouter AI with model: {}", model);
-        let payload = json!({
+        tracing::info!("Calling AI ({}) with model: {}", if is_groq { "Groq" } else { "OpenRouter" }, model);
+        let mut payload = json!({
             "model": model,
-            "max_tokens": 2500,
-            "reasoning": {
-                "max_tokens": 0
-            },
+            "max_tokens": 1500,
             "messages": [
                 {
                     "role": "system",
@@ -341,8 +371,14 @@ async fn generate_summary(
             ]
         });
 
+        if is_groq {
+            payload["response_format"] = json!({ "type": "json_object" });
+        } else {
+            payload["reasoning"] = json!({ "max_tokens": 0 });
+        }
+
         let res = client
-            .post("https://openrouter.ai/api/v1/chat/completions")
+            .post(api_endpoint)
             .header("Authorization", format!("Bearer {}", api_key.trim()))
             .header("Content-Type", "application/json")
             .json(&payload)
