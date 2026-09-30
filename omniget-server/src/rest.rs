@@ -649,6 +649,7 @@ pub async fn clip_get_handler(req: Request) -> Response {
     let notion_api_key = query.get("notion_api_key").cloned();
     let openrouter_api_key = query.get("openrouter_api_key").cloned();
     let model = query.get("model").cloned();
+    let force = query.get("force").map(|v| v == "true" || v == "1");
 
     let args = crate::tools::clip::ClipArgs {
         url,
@@ -657,6 +658,7 @@ pub async fn clip_get_handler(req: Request) -> Response {
         notion_api_key,
         openrouter_api_key,
         model,
+        force,
     };
 
     let result = crate::tools::clip::execute_clip(args).await;
