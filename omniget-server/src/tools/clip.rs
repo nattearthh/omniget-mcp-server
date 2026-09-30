@@ -359,6 +359,7 @@ async fn generate_summary(
 
     for model in candidate_models {
         tracing::info!("Calling AI ({}) with model: {}", if is_groq { "Groq" } else { "OpenRouter" }, model);
+        let start_time = std::time::Instant::now();
         let mut payload = json!({
             "model": model,
             "max_tokens": 1500,
@@ -393,6 +394,14 @@ async fn generate_summary(
                 let status = resp.status();
                 if status.is_success() {
                     if let Ok(data) = resp.json::<Value>().await {
+                        let elapsed = start_time.elapsed().as_secs_f32();
+                        let actual_model = data["model"]
+                            .as_str()
+                            .filter(|s| !s.trim().is_empty())
+                            .unwrap_or(&model)
+                            .to_string();
+                        let verified_badge = format!("{} ({}, {:.1}s)", if is_groq { "Groq" } else { "OpenRouter" }, actual_model, elapsed);
+
                         if let Some(content_str) = data["choices"][0]["message"]["content"].as_str() {
                             let parsed_opt = extract_json_object(content_str).or_else(|| {
                                 // If truncated mid-string or missing closing quotes/brackets, attempt safe repair
@@ -446,7 +455,7 @@ async fn generate_summary(
                                     priority: ai_priority,
                                     tags: ai_tags,
                                     ai_ok: true,
-                                    ai_model: Some(format!("{}: {}", if is_groq { "Groq" } else { "OpenRouter" }, model)),
+                                    ai_model: Some(verified_badge),
                                     ai_error: None,
                                 };
                             } else if !content_str.trim().is_empty() && !content_str.trim().starts_with('{') {
@@ -459,7 +468,7 @@ async fn generate_summary(
                                     priority: "🟡 ปานกลาง (Medium)".to_string(),
                                     tags: Vec::new(),
                                     ai_ok: true,
-                                    ai_model: Some(format!("{}: {}", if is_groq { "Groq" } else { "OpenRouter" }, model)),
+                                    ai_model: Some(verified_badge),
                                     ai_error: None,
                                 };
                             }
