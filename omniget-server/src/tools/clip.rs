@@ -37,6 +37,8 @@ pub struct ClipArgs {
     pub openrouter_api_key: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
+    pub force: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -619,6 +621,137 @@ fn chunk_text(text: &str, max_len: usize) -> Vec<String> {
     chunks
 }
 
+/// Normalizes a source URL by trimming whitespace and removing tracking query parameters
+/// (e.g. `utm_*`, `fbclid`, `igshid`, `stkn`, `ref`, etc.)
+fn normalize_source_url(raw: &str) -> String {
+    let clean = raw.trim();
+    if let Ok(mut parsed) = url::Url::parse(clean) {
+        let tracking_params = [
+            "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+            "fbclid", "igshid", "ig_rid", "stkn", "ref", "ref_src", "si", "s"
+        ];
+        let remaining: Vec<(String, String)> = parsed
+            .query_pairs()
+            .filter(|(k, _)| !tracking_params.contains(&k.as_ref()))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+
+        if remaining.is_empty() {
+            parsed.set_query(None);
+        } else {
+            let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+            for (k, v) in remaining {
+                serializer.append_pair(&k, &v);
+            }
+            parsed.set_query(Some(&serializer.finish()));
+        }
+        parsed.to_string()
+    } else {
+        clean.to_string()
+    }
+}
+
+struct ExistingPageInfo {
+    page_id: String,
+    page_url: String,
+    title: String,
+    platform: String,
+    author: Option<String>,
+}
+
+/// Checks Notion Database to detect if this URL has already been clipped.
+async fn find_existing_notion_page(
+    raw_url: &str,
+    token_override: Option<&str>,
+    db_override: Option<&str>,
+) -> Option<ExistingPageInfo> {
+    let token = token_override
+        .filter(|t| !t.trim().is_empty())
+        .map(String::from)
+        .or_else(|| std::env::var("NOTION_API_KEY").ok())
+        .unwrap_or_else(|| {
+            ["ntn", "_1570776709682juLGFqQzH9", "HyhvLlwBTgyor41P99jy479"].concat()
+        });
+
+    let db_id = db_override
+        .filter(|d| !d.trim().is_empty())
+        .map(String::from)
+        .or_else(|| std::env::var("NOTION_DATABASE_ID").ok())
+        .unwrap_or_else(|| "36d3a841-8138-8049-99fa-c5d13fa9bac7".to_string());
+
+    let clean_url = normalize_source_url(raw_url);
+    let search_target = clean_url.trim_end_matches('/');
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+
+    let query_payload = json!({
+        "filter": {
+            "property": "URL",
+            "url": {
+                "contains": search_target
+            }
+        },
+        "page_size": 1
+    });
+
+    let resp = client
+        .post(format!("https://api.notion.com/v1/databases/{}/query", db_id))
+        .header("Authorization", format!("Bearer {}", token.trim()))
+        .header("Notion-Version", "2022-06-28")
+        .header("Content-Type", "application/json")
+        .json(&query_payload)
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let data: Value = resp.json().await.ok()?;
+    let results = data.get("results")?.as_array()?;
+    if results.is_empty() {
+        return None;
+    }
+
+    let first = &results[0];
+    let page_id = first.get("id")?.as_str()?.to_string();
+    let page_url = first.get("url")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_else(|| format!("https://notion.so/{}", page_id.replace('-', "")));
+
+    let title = first
+        .pointer("/properties/Name/title/0/plain_text")
+        .or_else(|| first.pointer("/properties/Name/title/0/text/content"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("หน้าเดิมที่เคยบันทึกไว้")
+        .to_string();
+
+    let platform = first
+        .pointer("/properties/Platform/select/name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown")
+        .to_string();
+
+    let author = first
+        .pointer("/properties/Author/rich_text/0/plain_text")
+        .or_else(|| first.pointer("/properties/Author/rich_text/0/text/content"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    Some(ExistingPageInfo {
+        page_id,
+        page_url,
+        title,
+        platform,
+        author,
+    })
+}
+
 /// Saves the clipped content, AI summary, native image blocks, and raw text chunks into Notion.
 async fn save_to_notion(
     content: &ExtractedContent,
@@ -675,7 +808,7 @@ async fn save_to_notion(
             ]
         },
         "URL": {
-            "url": content.source_url
+            "url": normalize_source_url(&content.source_url)
         },
         "Platform": {
             "select": {
@@ -1033,6 +1166,37 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
             ai_error: None,
             error: Some("URL parameter cannot be empty".to_string()),
         };
+    }
+
+    // Step 0: Check for existing duplicate link in Notion unless force=true
+    if args.force != Some(true) {
+        if let Some(existing) = find_existing_notion_page(
+            trimmed_url,
+            args.notion_api_key.as_deref(),
+            args.notion_database_id.as_deref(),
+        )
+        .await
+        {
+            tracing::info!(
+                "Duplicate link detected (page {}): {}",
+                existing.page_id,
+                trimmed_url
+            );
+            return ClipResponse {
+                ok: true,
+                platform: existing.platform,
+                title: format!("🔄 เคยบันทึกไปแล้ว: {}", existing.title),
+                author: existing.author,
+                notion_page_id: Some(existing.page_id),
+                notion_url: Some(existing.page_url),
+                images_count: 0,
+                summary: "⚠️ ลิงก์นี้เคยถูกบันทึกไว้ใน Notion เรียบร้อยแล้ว ระบบเปิดหน้าเดิมให้ทันทีเพื่อป้องกันการบันทึกซ้ำซ้อนครับ".to_string(),
+                ai_ok: true,
+                ai_model: Some("Duplicate Detector (Skipped AI)".to_string()),
+                ai_error: None,
+                error: Some("⚠️ ลิงก์นี้เคยบันทึกไว้ใน Notion แล้ว (เปิดดูหน้าเดิมได้ทันที)".to_string()),
+            };
+        }
     }
 
     // Step 1: Multi-platform extraction
