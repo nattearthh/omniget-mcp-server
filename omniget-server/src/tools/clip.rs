@@ -179,7 +179,15 @@ async fn extract_content(url: &str) -> ExtractedContent {
                 };
             }
             Err(e) => {
-                tracing::warn!("Facebook extraction failed ({}), falling back to web markdown", e);
+                tracing::warn!("Facebook extraction failed: {}", e);
+                return ExtractedContent {
+                    platform: "Facebook".to_string(),
+                    title: "Facebook Post (Private or Restricted)".to_string(),
+                    author: None,
+                    raw_text: format!("ไม่สามารถเข้าถึงเนื้อหา Facebook นี้ได้: โพสต์นี้อาจถูกตั้งค่าเป็นส่วนตัว (Private) หรือติดเงื่อนไขการเข้าสู่ระบบของ Facebook ({})", e),
+                    images: Vec::new(),
+                    source_url: url.to_string(),
+                };
             }
         }
     }
@@ -296,14 +304,13 @@ async fn generate_summary(
 
     let env_model = std::env::var("AI_MODEL").ok().filter(|m| !m.trim().is_empty());
     let candidate_models = if is_groq {
-        // If env_model contains '/' it's an old OpenRouter model like google/gemma, ignore it on Groq
         let valid_primary = model_override
-            .filter(|m| !m.trim().is_empty() && !m.contains('/'))
-            .or_else(|| env_model.as_deref().filter(|m| !m.contains('/')))
-            .unwrap_or("llama-3.3-70b-versatile");
+            .filter(|m| !m.trim().is_empty())
+            .or_else(|| env_model.as_deref().filter(|m| !m.trim().is_empty()))
+            .unwrap_or("qwen/qwen3.8-27b");
 
         let mut models = vec![valid_primary.to_string()];
-        for fallback in &["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "gemma2-9b-it"] {
+        for fallback in &["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"] {
             if !models.contains(&fallback.to_string()) {
                 models.push(fallback.to_string());
             }
