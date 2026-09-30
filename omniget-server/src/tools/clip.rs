@@ -779,14 +779,14 @@ async fn save_to_notion(
             }
         }));
 
-        for img_url in valid_images {
+        for img_url in &valid_images {
             children.push(json!({
                 "object": "block",
                 "type": "image",
                 "image": {
                     "type": "external",
                     "external": {
-                        "url": img_url
+                        "url": *img_url
                     }
                 }
             }));
@@ -922,6 +922,9 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
             notion_url: None,
             images_count: 0,
             summary: String::new(),
+            ai_ok: false,
+            ai_model: None,
+            ai_error: None,
             error: Some("URL parameter cannot be empty".to_string()),
         };
     }
