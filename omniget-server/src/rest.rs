@@ -1475,12 +1475,10 @@ pub async fn image_proxy_handler(req: Request) -> Response {
         }
     };
 
-    // SSRF / security check: only proxy Facebook/Instagram/CDN image URLs
-    let is_allowed = target_url.starts_with("https://lookaside.fbsbx.com/")
-        || target_url.starts_with("https://scontent")
-        || target_url.starts_with("https://static.xx.fbcdn.net/")
-        || target_url.contains(".fbcdn.net/")
-        || target_url.contains("fbsbx.com/");
+    // SSRF / security check: only proxy Facebook/Instagram CDN image URLs
+    let is_allowed = target_url.contains("fbsbx.com")
+        || target_url.contains("fbcdn.net")
+        || target_url.contains("cdninstagram.com");
 
     if !is_allowed {
         return (StatusCode::FORBIDDEN, "Forbidden proxy target").into_response();
@@ -1491,13 +1489,31 @@ pub async fn image_proxy_handler(req: Request) -> Response {
         .build()
         .unwrap_or_default();
 
-    let resp = match client
+    // 1st attempt: with Facebook Crawler UA
+    let mut resp = client
         .get(target_url)
         .header(header::USER_AGENT, "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)")
         .header(header::ACCEPT, "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
         .send()
-        .await
-    {
+        .await;
+
+    // 2nd attempt: if 1st failed or returned non-success, retry with browser UA and FB referer
+    if resp.as_ref().map(|r| !r.status().is_success()).unwrap_or(true) {
+        if let Ok(retry_resp) = client
+            .get(target_url)
+            .header(header::USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
+            .header(header::ACCEPT, "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+            .header(header::REFERER, "https://www.facebook.com/")
+            .send()
+            .await
+        {
+            if retry_resp.status().is_success() {
+                resp = Ok(retry_resp);
+            }
+        }
+    }
+
+    let resp = match resp {
         Ok(r) => r,
         Err(e) => {
             return (StatusCode::BAD_GATEWAY, format!("Upstream fetch failed: {}", e)).into_response();
@@ -1527,7 +1543,7 @@ pub async fn image_proxy_handler(req: Request) -> Response {
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, content_type),
-            (header::CACHE_CONTROL, "public, max-age=604800, immutable".to_string()),
+            (header::CACHE_CONTROL, "public, max-age=2592000, immutable".to_string()),
         ],
         bytes,
     )

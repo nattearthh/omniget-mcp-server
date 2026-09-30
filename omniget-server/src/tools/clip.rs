@@ -260,14 +260,44 @@ struct AiSummary {
     ai_error: Option<String>,
 }
 
+fn sanitize_ai_content(s: &str) -> String {
+    let mut text = s.to_string();
+    // Remove reasoning <think> ... </think> blocks if present
+    while let (Some(start), Some(end)) = (text.find("<think>"), text.find("</think>")) {
+        if start < end {
+            text = format!("{}{}", &text[..start], &text[end + 8..]);
+        } else {
+            break;
+        }
+    }
+    text
+}
+
 fn extract_json_object(s: &str) -> Option<Value> {
-    let trimmed = s.trim();
+    let sanitized = sanitize_ai_content(s);
+    let trimmed = sanitized.trim();
     if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
         return Some(val);
     }
-    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
+
+    // Strip markdown code fences if wrapped: ```json ... ```
+    let unquoted = if trimmed.starts_with("```") {
+        let lines: Vec<&str> = trimmed.lines().collect();
+        if lines.len() >= 2 && lines.last().map(|l| l.trim().starts_with("```")).unwrap_or(false) {
+            lines[1..lines.len() - 1].join("\n")
+        } else {
+            trimmed.to_string()
+        }
+    } else {
+        trimmed.to_string()
+    };
+
+    if let Ok(val) = serde_json::from_str::<Value>(&unquoted) {
+        return Some(val);
+    }
+    if let (Some(start), Some(end)) = (unquoted.find('{'), unquoted.rfind('}')) {
         if start < end {
-            let slice = &trimmed[start..=end];
+            let slice = &unquoted[start..=end];
             if let Ok(val) = serde_json::from_str::<Value>(slice) {
                 return Some(val);
             }
@@ -276,7 +306,15 @@ fn extract_json_object(s: &str) -> Option<Value> {
     None
 }
 
-/// Generates executive summary and title using OpenRouter with automatic model fallback.
+struct AiTarget {
+    provider: &'static str,
+    endpoint: &'static str,
+    api_key: String,
+    model: String,
+    is_groq: bool,
+}
+
+/// Generates executive summary and title using Groq with automatic fallback to OpenRouter.
 async fn generate_summary(
     content: &ExtractedContent,
     api_key_override: Option<&str>,
@@ -284,56 +322,74 @@ async fn generate_summary(
 ) -> AiSummary {
     let groq_env = std::env::var("GROQ_API_KEY").ok().filter(|k| !k.trim().is_empty());
     let openrouter_env = std::env::var("OPENROUTER_API_KEY").ok().filter(|k| !k.trim().is_empty());
-
-    let (api_key, is_groq) = if let Some(k) = api_key_override.filter(|k| !k.trim().is_empty()) {
-        let is_g = k.starts_with("gsk_");
-        (k.to_string(), is_g)
-    } else if let Some(k) = groq_env {
-        (k, true)
-    } else if let Some(k) = openrouter_env {
-        (k, false)
-    } else {
-        (String::new(), true)
-    };
-
-    let api_endpoint = if is_groq {
-        "https://api.groq.com/openai/v1/chat/completions"
-    } else {
-        "https://openrouter.ai/api/v1/chat/completions"
-    };
-
     let env_model = std::env::var("AI_MODEL").ok().filter(|m| !m.trim().is_empty());
-    let candidate_models = if is_groq {
-        let valid_primary = model_override
-            .filter(|m| !m.trim().is_empty())
-            .or_else(|| env_model.as_deref().filter(|m| !m.trim().is_empty()))
-            .unwrap_or("qwen/qwen3.8-27b");
 
-        let mut models = vec![valid_primary.to_string()];
-        for fallback in &["qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"] {
-            if !models.contains(&fallback.to_string()) {
-                models.push(fallback.to_string());
-            }
-        }
-        models
+    let mut targets: Vec<AiTarget> = Vec::new();
+
+    // 1. Explicit API key override takes highest priority
+    if let Some(k) = api_key_override.filter(|k| !k.trim().is_empty()) {
+        let is_g = k.starts_with("gsk_");
+        let (prov, endpoint) = if is_g {
+            ("Groq", "https://api.groq.com/openai/v1/chat/completions")
+        } else {
+            ("OpenRouter", "https://openrouter.ai/api/v1/chat/completions")
+        };
+        let m = model_override
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or(if is_g { "qwen/qwen3.8-27b" } else { "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free" });
+        targets.push(AiTarget {
+            provider: prov,
+            endpoint,
+            api_key: k.to_string(),
+            model: m.to_string(),
+            is_groq: is_g,
+        });
     } else {
-        let primary = model_override
-            .filter(|m| !m.trim().is_empty())
-            .or(env_model.as_deref())
-            .unwrap_or("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free");
+        // Priority 1: Groq models (Ultra-fast, free 1,000 reqs/day)
+        if let Some(ref gk) = groq_env {
+            let primary = model_override
+                .filter(|m| !m.trim().is_empty() && !m.contains('/'))
+                .or_else(|| env_model.as_deref().filter(|m| !m.contains('/')))
+                .unwrap_or("qwen/qwen3.8-27b");
 
-        let mut models = vec![primary.to_string()];
-        for fallback in &[
-            "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-            "nvidia/nemotron-3.5-lightning:free",
-            "qwen/qwen3.8-27b:free",
-        ] {
-            if !models.contains(&fallback.to_string()) {
-                models.push(fallback.to_string());
+            for m in &[primary, "qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"] {
+                if !targets.iter().any(|t| t.model == *m) {
+                    targets.push(AiTarget {
+                        provider: "Groq",
+                        endpoint: "https://api.groq.com/openai/v1/chat/completions",
+                        api_key: gk.clone(),
+                        model: m.to_string(),
+                        is_groq: true,
+                    });
+                }
             }
         }
-        models
-    };
+
+        // Priority 2: OpenRouter models (Automatic fallback if Groq quota/rate-limit hit)
+        if let Some(ref ok) = openrouter_env {
+            let primary = model_override
+                .filter(|m| !m.trim().is_empty())
+                .or_else(|| env_model.as_deref())
+                .unwrap_or("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free");
+
+            for m in &[
+                primary,
+                "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+                "qwen/qwen3.8-27b:free",
+                "meta-llama/llama-3.3-70b-instruct:free",
+            ] {
+                if !targets.iter().any(|t| t.model == *m) {
+                    targets.push(AiTarget {
+                        provider: "OpenRouter",
+                        endpoint: "https://openrouter.ai/api/v1/chat/completions",
+                        api_key: ok.clone(),
+                        model: m.to_string(),
+                        is_groq: false,
+                    });
+                }
+            }
+        }
+    }
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
@@ -364,11 +420,11 @@ async fn generate_summary(
 
     let mut last_ai_error: Option<String> = None;
 
-    for model in candidate_models {
-        tracing::info!("Calling AI ({}) with model: {}", if is_groq { "Groq" } else { "OpenRouter" }, model);
+    for target in targets {
+        tracing::info!("Calling AI ({}) with model: {}", target.provider, target.model);
         let start_time = std::time::Instant::now();
         let mut payload = json!({
-            "model": model,
+            "model": target.model,
             "max_tokens": 1500,
             "messages": [
                 {
@@ -382,15 +438,15 @@ async fn generate_summary(
             ]
         });
 
-        if is_groq {
+        if target.is_groq {
             payload["response_format"] = json!({ "type": "json_object" });
         } else {
             payload["reasoning"] = json!({ "max_tokens": 0 });
         }
 
         let res = client
-            .post(api_endpoint)
-            .header("Authorization", format!("Bearer {}", api_key.trim()))
+            .post(target.endpoint)
+            .header("Authorization", format!("Bearer {}", target.api_key.trim()))
             .header("Content-Type", "application/json")
             .json(&payload)
             .send()
@@ -405,9 +461,9 @@ async fn generate_summary(
                         let actual_model = data["model"]
                             .as_str()
                             .filter(|s| !s.trim().is_empty())
-                            .unwrap_or(&model)
+                            .unwrap_or(&target.model)
                             .to_string();
-                        let verified_badge = format!("{} ({}, {:.1}s)", if is_groq { "Groq" } else { "OpenRouter" }, actual_model, elapsed);
+                        let verified_badge = format!("{} ({}, {:.1}s)", target.provider, actual_model, elapsed);
 
                         if let Some(content_str) = data["choices"][0]["message"]["content"].as_str() {
                             let parsed_opt = extract_json_object(content_str).or_else(|| {
@@ -482,13 +538,13 @@ async fn generate_summary(
                         }
                     }
                 } else {
-                    let err_detail = format!("Model {} HTTP {}", model, status);
+                    let err_detail = format!("{} model {} HTTP {}", target.provider, target.model, status);
                     tracing::warn!("AI: {}", err_detail);
                     last_ai_error = Some(err_detail);
                 }
             }
             Err(e) => {
-                let err_detail = format!("Model {} connection error: {}", model, e);
+                let err_detail = format!("{} model {} connection error: {}", target.provider, target.model, e);
                 tracing::warn!("AI: {}", err_detail);
                 last_ai_error = Some(err_detail);
             }
@@ -764,7 +820,12 @@ async fn save_to_notion(
         })
         .take(10)
         .map(|img| {
-            if img.contains("lookaside.fbsbx.com") {
+            let is_fb_cdn = img.contains("lookaside.fbsbx.com")
+                || img.contains("fbcdn.net")
+                || img.contains("fbsbx.com")
+                || img.contains("cdninstagram.com");
+
+            if is_fb_cdn {
                 let encoded: String = url::form_urlencoded::byte_serialize(img.as_bytes()).collect();
                 format!("https://{}/api/proxy/image?url={}", server_domain, encoded)
             } else {
@@ -829,7 +890,12 @@ async fn save_to_notion(
                 let img_url = m.as_str();
                 if img_url.starts_with("http://") || img_url.starts_with("https://")
                 {
-                    let final_img_url = if img_url.contains("lookaside.fbsbx.com") {
+                    let is_fb_cdn = img_url.contains("lookaside.fbsbx.com")
+                        || img_url.contains("fbcdn.net")
+                        || img_url.contains("fbsbx.com")
+                        || img_url.contains("cdninstagram.com");
+
+                    let final_img_url = if is_fb_cdn {
                         let encoded: String = url::form_urlencoded::byte_serialize(img_url.as_bytes()).collect();
                         format!("https://{}/api/proxy/image?url={}", server_domain, encoded)
                     } else {
@@ -978,19 +1044,26 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
     )
     .await
     {
-        Ok((page_id, page_url)) => ClipResponse {
-            ok: true,
-            platform,
-            title: summary.title,
-            author,
-            notion_page_id: Some(page_id),
-            notion_url: Some(page_url),
-            images_count,
-            summary: summary.summary,
-            ai_ok: summary.ai_ok,
-            ai_model: summary.ai_model,
-            ai_error: summary.ai_error,
-            error: None,
+        Ok((page_id, page_url)) => {
+            let error_notice = if content.title.contains("Private or Restricted") {
+                Some("⚠️ โพสต์ Facebook นี้ถูกตั้งค่าเป็นส่วนตัว (Private) หรือติดระบบความปลอดภัย บันทึกลิงก์และข้อมูลเบื้องต้นลง Notion ให้แล้วครับ".to_string())
+            } else {
+                None
+            };
+            ClipResponse {
+                ok: true,
+                platform,
+                title: summary.title,
+                author,
+                notion_page_id: Some(page_id),
+                notion_url: Some(page_url),
+                images_count,
+                summary: summary.summary,
+                ai_ok: summary.ai_ok,
+                ai_model: summary.ai_model,
+                ai_error: summary.ai_error,
+                error: error_notice,
+            }
         },
         Err(err) => ClipResponse {
             ok: false,
