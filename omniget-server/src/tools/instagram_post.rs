@@ -589,7 +589,36 @@ pub fn decode_html_entities(input: &str) -> String {
     }
 }
 
-/// Normalizes caption text: strips BOM, decodes HTML entities, standardizes CRLF/CR to LF,
+/// Strips HTML tags, converts `<br>` to newlines, and removes `<a class="CaptionUsername">` author links.
+pub fn strip_html_from_caption(raw: &str) -> String {
+    // 1. Remove author username header link: <a class="CaptionUsername"...>...</a>
+    let without_user = if let Ok(re) = Regex::new(r#"(?is)<a[^>]+class="[^"]*CaptionUsername[^"]*"[^>]*>.*?</a>"#) {
+        re.replace_all(raw, "").to_string()
+    } else {
+        raw.to_string()
+    };
+
+    // 2. Convert <br>, <br/>, <br /> to newlines
+    let with_newlines = if let Ok(re) = Regex::new(r#"(?i)<br\s*/?>"#) {
+        re.replace_all(&without_user, "\n").to_string()
+    } else {
+        without_user.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+    };
+
+    // 3. Convert closing paragraph/div to newlines
+    let with_blocks = with_newlines
+        .replace("</p>", "\n")
+        .replace("</div>", "\n");
+
+    // 4. Strip any remaining HTML tags: <...>
+    if let Ok(re) = Regex::new(r#"<[^>]+>"#) {
+        re.replace_all(&with_blocks, "").to_string()
+    } else {
+        with_blocks
+    }
+}
+
+/// Normalizes caption text: strips BOM, strips HTML tags/links, decodes HTML entities, standardizes CRLF/CR to LF,
 /// trims trailing spaces per line, collapses excessive vertical space, preserves emojis and RTL byte-for-byte.
 pub fn normalize_caption(raw: &str) -> String {
     if raw.trim().is_empty() {
@@ -599,13 +628,20 @@ pub fn normalize_caption(raw: &str) -> String {
     // 1. Strip leading BOM if present
     let text = raw.strip_prefix('\u{feff}').unwrap_or(raw);
 
-    // 2. Decode HTML entities
-    let decoded = decode_html_entities(text);
+    // 2. Strip HTML tags, <br>, and CaptionUsername wrapper if present
+    let text_no_html = if text.contains('<') && text.contains('>') {
+        strip_html_from_caption(text)
+    } else {
+        text.to_string()
+    };
 
-    // 3. Unify newlines
+    // 3. Decode HTML entities
+    let decoded = decode_html_entities(&text_no_html);
+
+    // 4. Unify newlines
     let unified = decoded.replace("\r\n", "\n").replace('\r', "\n");
 
-    // 4. Line-by-line processing: trim trailing spaces and collapse excessive empty lines
+    // 5. Line-by-line processing: trim trailing spaces and collapse excessive empty lines
     let lines: Vec<&str> = unified.lines().collect();
     let mut cleaned_lines: Vec<String> = Vec::with_capacity(lines.len());
     let mut consecutive_blank_lines = 0;

@@ -120,8 +120,21 @@ async fn extract_content(url: &str) -> ExtractedContent {
         match extract_instagram_post(url).await {
             Ok(post) => {
                 let author_str = format!("@{}", post.author.username);
-                let title = if !post.caption.is_empty() {
-                    let first_line = post.caption.lines().next().unwrap_or("").trim();
+                // Extra sanity check: strip any residual HTML tags
+                let clean_caption = if post.caption.contains('<') && post.caption.contains('>') {
+                    let no_br = post.caption.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n");
+                    if let Ok(re) = regex::Regex::new(r"<[^>]+>") {
+                        re.replace_all(&no_br, "").to_string()
+                    } else {
+                        no_br
+                    }
+                } else {
+                    post.caption
+                };
+                let clean_caption = clean_caption.trim().to_string();
+
+                let title = if !clean_caption.is_empty() {
+                    let first_line = clean_caption.lines().next().unwrap_or("").trim();
                     if first_line.chars().count() > 60 {
                         format!("{}...", first_line.chars().take(57).collect::<String>())
                     } else {
@@ -134,7 +147,7 @@ async fn extract_content(url: &str) -> ExtractedContent {
                     platform: "Instagram".to_string(),
                     title,
                     author: Some(author_str),
-                    raw_text: post.caption,
+                    raw_text: clean_caption,
                     images: post.images,
                     source_url: post.url,
                 };
