@@ -752,13 +752,25 @@ async fn save_to_notion(
     }));
 
     // 5. Extracted High-Resolution Images (Rendered natively as Notion Image blocks)
-    // Facebook lookaside URLs are now resolved to scontent CDN URLs upstream in facebook_post.rs
-    let valid_images: Vec<&String> = content.images.iter()
+    let server_domain = std::env::var("RAILWAY_PUBLIC_DOMAIN")
+        .ok()
+        .filter(|d| !d.trim().is_empty())
+        .unwrap_or_else(|| "omniget-mcp-server-production-ccd1.up.railway.app".to_string());
+
+    let valid_images: Vec<String> = content.images.iter()
         .filter(|img| {
             let s = img.as_str();
             s.starts_with("http://") || s.starts_with("https://")
         })
         .take(10)
+        .map(|img| {
+            if img.contains("lookaside.fbsbx.com") {
+                let encoded: String = url::form_urlencoded::byte_serialize(img.as_bytes()).collect();
+                format!("https://{}/api/proxy/image?url={}", server_domain, encoded)
+            } else {
+                img.clone()
+            }
+        })
         .collect();
 
     if !valid_images.is_empty() {
@@ -793,7 +805,7 @@ async fn save_to_notion(
                 "image": {
                     "type": "external",
                     "external": {
-                        "url": *img_url
+                        "url": img_url
                     }
                 }
             }));
@@ -817,13 +829,19 @@ async fn save_to_notion(
                 let img_url = m.as_str();
                 if img_url.starts_with("http://") || img_url.starts_with("https://")
                 {
+                    let final_img_url = if img_url.contains("lookaside.fbsbx.com") {
+                        let encoded: String = url::form_urlencoded::byte_serialize(img_url.as_bytes()).collect();
+                        format!("https://{}/api/proxy/image?url={}", server_domain, encoded)
+                    } else {
+                        img_url.to_string()
+                    };
                     raw_paragraph_blocks.push(json!({
                         "object": "block",
                         "type": "image",
                         "image": {
                             "type": "external",
                             "external": {
-                                "url": img_url
+                                "url": final_img_url
                             }
                         }
                     }));
@@ -872,7 +890,7 @@ async fn save_to_notion(
         json!({
             "type": "external",
             "external": {
-                "url": *img_url
+                "url": img_url
             }
         })
     });

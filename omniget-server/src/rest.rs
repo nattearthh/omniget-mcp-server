@@ -1462,3 +1462,74 @@ pub fn build_openapi_spec() -> Value {
 
     spec
 }
+
+/// Public image proxy handler that streams images from Facebook lookaside/CDN to Notion.
+pub async fn image_proxy_handler(req: Request) -> Response {
+    use axum::http::header;
+
+    let query_map = parse_query(&req);
+    let target_url = match query_map.get("url") {
+        Some(u) if !u.trim().is_empty() => u.trim(),
+        _ => {
+            return (StatusCode::BAD_REQUEST, "Missing 'url' query parameter").into_response();
+        }
+    };
+
+    // SSRF / security check: only proxy Facebook/Instagram/CDN image URLs
+    let is_allowed = target_url.starts_with("https://lookaside.fbsbx.com/")
+        || target_url.starts_with("https://scontent")
+        || target_url.starts_with("https://static.xx.fbcdn.net/")
+        || target_url.contains(".fbcdn.net/")
+        || target_url.contains("fbsbx.com/");
+
+    if !is_allowed {
+        return (StatusCode::FORBIDDEN, "Forbidden proxy target").into_response();
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+
+    let resp = match client
+        .get(target_url)
+        .header(header::USER_AGENT, "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)")
+        .header(header::ACCEPT, "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return (StatusCode::BAD_GATEWAY, format!("Upstream fetch failed: {}", e)).into_response();
+        }
+    };
+
+    let status = resp.status();
+    if !status.is_success() {
+        return (StatusCode::BAD_GATEWAY, format!("Upstream returned HTTP {}", status)).into_response();
+    }
+
+    let content_type = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_string();
+
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read image body: {}", e)).into_response();
+        }
+    };
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "public, max-age=604800, immutable".to_string()),
+        ],
+        bytes,
+    )
+        .into_response()
+}
