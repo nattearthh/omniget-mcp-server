@@ -24,6 +24,31 @@ static IMG_MD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"!\[.*?\]\((https?://[^\)\s]+)\)"#).expect("Valid markdown image regex")
 });
 
+static FB_ID_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:/posts/|/videos/|/reel/|/reels/|/permalink/)(pfbid[A-Za-z0-9]+|\d{8,})|(?:story_fbid=|fbid=|[?&]v=)(\d{8,})|(?:/share/(?:p|r|v)/)([A-Za-z0-9_-]+)")
+        .expect("Valid FB ID regex")
+});
+
+static IG_ID_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"instagram\.com/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)")
+        .expect("Valid IG ID regex")
+});
+
+static TWITTER_ID_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:twitter\.com|x\.com)/[^/]+/status/(\d+)")
+        .expect("Valid Twitter ID regex")
+});
+
+static YT_ID_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)([A-Za-z0-9_-]{11})")
+        .expect("Valid YouTube ID regex")
+});
+
+static TIKTOK_ID_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"tiktok\.com/[^/]+/video/(\d+)")
+        .expect("Valid TikTok ID regex")
+});
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClipArgs {
     pub url: String,
@@ -622,13 +647,14 @@ fn chunk_text(text: &str, max_len: usize) -> Vec<String> {
 }
 
 /// Normalizes a source URL by trimming whitespace and removing tracking query parameters
-/// (e.g. `utm_*`, `fbclid`, `igshid`, `stkn`, `ref`, etc.)
+/// (e.g. `utm_*`, `fbclid`, `igshid`, `stkn`, `ref`, `mibextid`, etc.)
 fn normalize_source_url(raw: &str) -> String {
     let clean = raw.trim();
     if let Ok(mut parsed) = url::Url::parse(clean) {
         let tracking_params = [
             "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
-            "fbclid", "igshid", "ig_rid", "stkn", "ref", "ref_src", "si", "s"
+            "fbclid", "igshid", "ig_rid", "stkn", "ref", "ref_src", "si", "s",
+            "mibextid", "rdid", "__tn__", "__cft__", "set", "theater", "fs"
         ];
         let remaining: Vec<(String, String)> = parsed
             .query_pairs()
@@ -651,6 +677,37 @@ fn normalize_source_url(raw: &str) -> String {
     }
 }
 
+/// Extracts a platform-specific canonical identifier (e.g. Facebook numeric post ID,
+/// Instagram shortcode, Twitter tweet ID, YouTube video ID, or TikTok video ID).
+fn extract_canonical_identifier(url: &str) -> Option<String> {
+    if let Some(caps) = FB_ID_REGEX.captures(url) {
+        if let Some(m) = caps.get(1).or_else(|| caps.get(2)).or_else(|| caps.get(3)) {
+            return Some(m.as_str().to_string());
+        }
+    }
+    if let Some(caps) = IG_ID_REGEX.captures(url) {
+        if let Some(m) = caps.get(1) {
+            return Some(m.as_str().to_string());
+        }
+    }
+    if let Some(caps) = TWITTER_ID_REGEX.captures(url) {
+        if let Some(m) = caps.get(1) {
+            return Some(m.as_str().to_string());
+        }
+    }
+    if let Some(caps) = YT_ID_REGEX.captures(url) {
+        if let Some(m) = caps.get(1) {
+            return Some(m.as_str().to_string());
+        }
+    }
+    if let Some(caps) = TIKTOK_ID_REGEX.captures(url) {
+        if let Some(m) = caps.get(1) {
+            return Some(m.as_str().to_string());
+        }
+    }
+    None
+}
+
 struct ExistingPageInfo {
     page_id: String,
     page_url: String,
@@ -659,9 +716,10 @@ struct ExistingPageInfo {
     author: Option<String>,
 }
 
-/// Checks Notion Database to detect if this URL has already been clipped.
+/// Checks Notion Database to detect if any of the target candidates (URLs or canonical IDs)
+/// have already been clipped.
 async fn find_existing_notion_page(
-    raw_url: &str,
+    targets: &[&str],
     token_override: Option<&str>,
     db_override: Option<&str>,
 ) -> Option<ExistingPageInfo> {
@@ -679,8 +737,41 @@ async fn find_existing_notion_page(
         .or_else(|| std::env::var("NOTION_DATABASE_ID").ok())
         .unwrap_or_else(|| "36d3a841-8138-8049-99fa-c5d13fa9bac7".to_string());
 
-    let clean_url = normalize_source_url(raw_url);
-    let search_target = clean_url.trim_end_matches('/');
+    let mut valid_targets: Vec<String> = Vec::new();
+    for t in targets {
+        let trimmed = t.trim().trim_end_matches('/');
+        if trimmed.chars().count() >= 6 && !valid_targets.iter().any(|v| v == trimmed) {
+            valid_targets.push(trimmed.to_string());
+        }
+    }
+
+    if valid_targets.is_empty() {
+        return None;
+    }
+
+    let filter_payload = if valid_targets.len() == 1 {
+        json!({
+            "property": "URL",
+            "url": {
+                "contains": valid_targets[0]
+            }
+        })
+    } else {
+        let or_filters: Vec<Value> = valid_targets
+            .iter()
+            .map(|target| {
+                json!({
+                    "property": "URL",
+                    "url": {
+                        "contains": target
+                    }
+                })
+            })
+            .collect();
+        json!({
+            "or": or_filters
+        })
+    };
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -688,12 +779,7 @@ async fn find_existing_notion_page(
         .unwrap_or_default();
 
     let query_payload = json!({
-        "filter": {
-            "property": "URL",
-            "url": {
-                "contains": search_target
-            }
-        },
+        "filter": filter_payload,
         "page_size": 1
     });
 
@@ -1217,21 +1303,27 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
         };
     }
 
-    // Step 0: Check for existing duplicate link in Notion unless force=true
+    // Step 0: Fast Pre-check for existing duplicate link in Notion unless force=true
     if args.force != Some(true) {
+        let norm_url = normalize_source_url(trimmed_url);
+        let id_opt = extract_canonical_identifier(trimmed_url);
+        let mut candidates: Vec<&str> = vec![trimmed_url, &norm_url];
+        if let Some(ref id) = id_opt {
+            candidates.push(id.as_str());
+        }
+
         if let Some(existing) = find_existing_notion_page(
-            trimmed_url,
+            &candidates,
             args.notion_api_key.as_deref(),
             args.notion_database_id.as_deref(),
         )
         .await
         {
             tracing::info!(
-                "Duplicate link detected (page {}): {}",
+                "Duplicate link detected at Step 0 (page {}): {}",
                 existing.page_id,
                 trimmed_url
             );
-            // Option A: Update title in Notion with "🔄 เคยบันทึกไปแล้ว: " to bump it to top
             let updated_title = mark_duplicate_notion_page(
                 &existing.page_id,
                 &existing.title,
@@ -1258,6 +1350,51 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
 
     // Step 1: Multi-platform extraction
     let content = extract_content(trimmed_url).await;
+
+    // Step 1.5: Post-extraction Canonical Check (Crucial for Facebook mobile share redirects)
+    if args.force != Some(true) {
+        let norm_extracted = normalize_source_url(&content.source_url);
+        let extracted_id = extract_canonical_identifier(&content.source_url);
+        let mut candidates: Vec<&str> = vec![&content.source_url, &norm_extracted];
+        if let Some(ref id) = extracted_id {
+            candidates.push(id.as_str());
+        }
+
+        if let Some(existing) = find_existing_notion_page(
+            &candidates,
+            args.notion_api_key.as_deref(),
+            args.notion_database_id.as_deref(),
+        )
+        .await
+        {
+            tracing::info!(
+                "Duplicate link detected at Step 1.5 (page {}): canonical={}",
+                existing.page_id,
+                content.source_url
+            );
+            let updated_title = mark_duplicate_notion_page(
+                &existing.page_id,
+                &existing.title,
+                args.notion_api_key.as_deref(),
+            )
+            .await;
+
+            return ClipResponse {
+                ok: true,
+                platform: existing.platform,
+                title: updated_title,
+                author: existing.author,
+                notion_page_id: Some(existing.page_id),
+                notion_url: Some(existing.page_url),
+                images_count: 0,
+                summary: "⚠️ ลิงก์นี้เคยบันทึกไว้ใน Notion แล้ว ระบบได้อัปเดตชื่อเรื่องใน Notion เป็น '🔄 เคยบันทึกไปแล้ว' และเปิดหน้าเดิมให้ทันทีครับ".to_string(),
+                ai_ok: true,
+                ai_model: Some("Duplicate Detector (Skipped AI)".to_string()),
+                ai_error: None,
+                error: Some("⚠️ ลิงก์นี้เคยบันทึกไว้แล้ว (อัปเดตชื่อหน้าเดิมใน Notion ให้แล้วครับ)".to_string()),
+            };
+        }
+    }
 
     // Step 2: AI Summarization & Title generation
     let summary = generate_summary(
@@ -1317,3 +1454,69 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_source_url_tracking_removal() {
+        let raw = "https://www.facebook.com/groups/123/posts/456/?mibextid=wwXIfr&fbclid=abc123xyz";
+        assert_eq!(
+            normalize_source_url(raw),
+            "https://www.facebook.com/groups/123/posts/456/"
+        );
+
+        let ig = "https://www.instagram.com/p/DAe4c92S8-z/?igsh=MW1kYjZp&utm_source=ig_web_copy_link";
+        assert_eq!(
+            normalize_source_url(ig),
+            "https://www.instagram.com/p/DAe4c92S8-z/"
+        );
+    }
+
+    #[test]
+    fn test_extract_canonical_identifier() {
+        // Facebook Group post
+        assert_eq!(
+            extract_canonical_identifier("https://www.facebook.com/groups/1745892855948687/posts/2356770294860937/"),
+            Some("2356770294860937".to_string())
+        );
+
+        // Facebook Video
+        assert_eq!(
+            extract_canonical_identifier("https://www.facebook.com/watch/?v=2356770294860937"),
+            Some("2356770294860937".to_string())
+        );
+
+        // Facebook Reel
+        assert_eq!(
+            extract_canonical_identifier("https://www.facebook.com/reel/2356770294860937?mibextid=wwXIfr"),
+            Some("2356770294860937".to_string())
+        );
+
+        // Facebook Share Link
+        assert_eq!(
+            extract_canonical_identifier("https://www.facebook.com/share/p/AbCdEfGh123/?mibextid=wwXIfr"),
+            Some("AbCdEfGh123".to_string())
+        );
+
+        // Facebook pfbid
+        assert_eq!(
+            extract_canonical_identifier("https://www.facebook.com/user/posts/pfbid02AbCdEfGh12345/"),
+            Some("pfbid02AbCdEfGh12345".to_string())
+        );
+
+        // Instagram Post
+        assert_eq!(
+            extract_canonical_identifier("https://www.instagram.com/p/DAe4c92S8-z/?igsh=xxx"),
+            Some("DAe4c92S8-z".to_string())
+        );
+
+        // Twitter/X Status
+        assert_eq!(
+            extract_canonical_identifier("https://x.com/user/status/1838573928172938192?s=46"),
+            Some("1838573928172938192".to_string())
+        );
+    }
+}
+
