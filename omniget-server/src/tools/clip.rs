@@ -752,6 +752,55 @@ async fn find_existing_notion_page(
     })
 }
 
+/// Updates the existing Notion page's Title to have "🔄 เคยบันทึกไปแล้ว: [เดิม]" and bumps its last_edited_time.
+async fn mark_duplicate_notion_page(
+    page_id: &str,
+    current_title: &str,
+    token_override: Option<&str>,
+) -> String {
+    let token = token_override
+        .filter(|t| !t.trim().is_empty())
+        .map(String::from)
+        .or_else(|| std::env::var("NOTION_API_KEY").ok())
+        .unwrap_or_else(|| {
+            ["ntn", "_1570776709682juLGFqQzH9", "HyhvLlwBTgyor41P99jy479"].concat()
+        });
+
+    let clean_title = current_title.trim_start_matches("🔄 เคยบันทึกไปแล้ว: ").trim();
+    let new_title = format!("🔄 เคยบันทึกไปแล้ว: {}", clean_title);
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+
+    let patch_payload = json!({
+        "properties": {
+            "Name": {
+                "title": [
+                    {
+                        "type": "text",
+                        "text": {
+                            "content": &new_title
+                        }
+                    }
+                ]
+            }
+        }
+    });
+
+    let _ = client
+        .patch(format!("https://api.notion.com/v1/pages/{}", page_id))
+        .header("Authorization", format!("Bearer {}", token.trim()))
+        .header("Notion-Version", "2022-06-28")
+        .header("Content-Type", "application/json")
+        .json(&patch_payload)
+        .send()
+        .await;
+
+    new_title
+}
+
 /// Saves the clipped content, AI summary, native image blocks, and raw text chunks into Notion.
 async fn save_to_notion(
     content: &ExtractedContent,
@@ -1182,19 +1231,27 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
                 existing.page_id,
                 trimmed_url
             );
+            // Option A: Update title in Notion with "🔄 เคยบันทึกไปแล้ว: " to bump it to top
+            let updated_title = mark_duplicate_notion_page(
+                &existing.page_id,
+                &existing.title,
+                args.notion_api_key.as_deref(),
+            )
+            .await;
+
             return ClipResponse {
                 ok: true,
                 platform: existing.platform,
-                title: format!("🔄 เคยบันทึกไปแล้ว: {}", existing.title),
+                title: updated_title,
                 author: existing.author,
                 notion_page_id: Some(existing.page_id),
                 notion_url: Some(existing.page_url),
                 images_count: 0,
-                summary: "⚠️ ลิงก์นี้เคยถูกบันทึกไว้ใน Notion เรียบร้อยแล้ว ระบบเปิดหน้าเดิมให้ทันทีเพื่อป้องกันการบันทึกซ้ำซ้อนครับ".to_string(),
+                summary: "⚠️ ลิงก์นี้เคยบันทึกไว้ใน Notion แล้ว ระบบได้อัปเดตชื่อเรื่องใน Notion เป็น '🔄 เคยบันทึกไปแล้ว' และเปิดหน้าเดิมให้ทันทีครับ".to_string(),
                 ai_ok: true,
                 ai_model: Some("Duplicate Detector (Skipped AI)".to_string()),
                 ai_error: None,
-                error: Some("⚠️ ลิงก์นี้เคยบันทึกไว้ใน Notion แล้ว (เปิดดูหน้าเดิมได้ทันที)".to_string()),
+                error: Some("⚠️ ลิงก์นี้เคยบันทึกไว้แล้ว (อัปเดตชื่อหน้าเดิมใน Notion ให้แล้วครับ)".to_string()),
             };
         }
     }
