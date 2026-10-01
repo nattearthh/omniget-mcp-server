@@ -77,7 +77,7 @@ pub async fn health_handler() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "application/json")],
         Json(HealthResponse {
             ok: true,
-            version: "v3.6-universal-dedup",
+            version: "v3.7-multi-image-toggle",
         }),
     )
 }

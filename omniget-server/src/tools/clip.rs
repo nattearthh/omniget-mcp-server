@@ -1099,7 +1099,6 @@ async fn save_to_notion(
             let s = img.as_str();
             s.starts_with("http://") || s.starts_with("https://")
         })
-        .take(10)
         .map(|img| {
             let is_fb_cdn = img.contains("lookaside.fbsbx.com")
                 || img.contains("fbcdn.net")
@@ -1123,33 +1122,52 @@ async fn save_to_notion(
             "divider": {}
         }));
 
-        children.push(json!({
-            "object": "block",
-            "type": "heading_2",
-            "heading_2": {
-                "rich_text": [
-                    {
-                        "type": "text",
-                        "text": {
-                            "content": format!("🖼️ รูปภาพประกอบ ({})", valid_images.len())
-                        },
-                        "annotations": {
-                            "bold": true
+        let image_blocks: Vec<Value> = valid_images
+            .iter()
+            .map(|img_url| {
+                json!({
+                    "object": "block",
+                    "type": "image",
+                    "image": {
+                        "type": "external",
+                        "external": {
+                            "url": img_url
                         }
                     }
-                ]
-            }
-        }));
+                })
+            })
+            .collect();
 
-        for img_url in &valid_images {
+        // Chunk into groups of up to 90 images per toggle block to respect Notion API limits
+        let total_imgs = valid_images.len();
+        for (chunk_idx, img_chunk) in image_blocks.chunks(90).enumerate() {
+            let label = if total_imgs <= 90 {
+                format!("🖼️ กดเพื่อดูรูปภาพประกอบทั้งหมด ({} รูป)", total_imgs)
+            } else {
+                format!(
+                    "🖼️ กดเพื่อดูรูปภาพประกอบ ส่วนที่ {} ({} รูป)",
+                    chunk_idx + 1,
+                    img_chunk.len()
+                )
+            };
+
             children.push(json!({
                 "object": "block",
-                "type": "image",
-                "image": {
-                    "type": "external",
-                    "external": {
-                        "url": img_url
-                    }
+                "type": "toggle",
+                "toggle": {
+                    "color": "blue_background",
+                    "rich_text": [
+                        {
+                            "type": "text",
+                            "text": {
+                                "content": label
+                            },
+                            "annotations": {
+                                "bold": true
+                            }
+                        }
+                    ],
+                    "children": img_chunk
                 }
             }));
         }
