@@ -151,6 +151,16 @@ static PRELOAD_IMAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("Valid preload image regex")
 });
 
+static POST_PHOTO_URI_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#""(?:photo_image|viewer_image|large_share_image)"\s*:\s*\{\s*"uri"\s*:\s*"([^"]+)""#)
+        .expect("Valid post photo URI regex")
+});
+
+static COMET_PHOTO_ATTACHMENT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#""comet_photo_attachment"\s*:\s*\{[^}]*"image"\s*:\s*\{\s*"uri"\s*:\s*"([^"]+)""#)
+        .expect("Valid comet photo attachment regex")
+});
+
 static HTML_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"<[^>]+>").expect("Valid HTML tag stripping regex")
 });
@@ -1445,30 +1455,108 @@ pub fn extract_audio_stream_from_html(html: &str) -> Option<String> {
     None
 }
 
-/// Helper to check if a content image URL is valid (filters out icons, avatars, badges, thumbnails).
-fn is_valid_fb_content_image(url: &str) -> bool {
+/// Helper to check if a content image URL is a genuine post image
+/// and NOT a user profile avatar, commenter avatar, emoji, icon, or thumbnail.
+pub fn is_valid_fb_content_image(url: &str) -> bool {
     let lower = url.to_lowercase();
-    !(lower.contains("emoji.php")
+
+    // 1. Static UI assets, emojis, scripts
+    if lower.contains("emoji.php")
         || lower.contains("static.xx")
         || lower.contains("rsrc.php")
-        || lower.contains("/p50x50/")
-        || lower.contains("/s50x50/")
-        || lower.contains("/p100x100/")
-        || lower.contains("/s100x100/")
-        || lower.contains("/p160x160/")
-        || lower.contains("/s160x160/")
-        || lower.contains("/p200x200/")
-        || lower.contains("/s200x200/")
-        || lower.contains("/p320x320/")
-        || lower.contains("/s320x320/")
-        || lower.contains("/p480x480/")
-        || lower.contains("/s480x480/")
-        || lower.contains("-1/")
+    {
+        return false;
+    }
+
+    // 2. Profile picture / avatar keywords
+    if lower.contains("profile_pic")
+        || lower.contains("profile_picture")
+        || lower.contains("profile_photo")
+        || lower.contains("avatar")
+        || lower.contains("user_profile")
+        || lower.contains("author_pic")
+    {
+        return false;
+    }
+
+    // 3. Asset type markers in Facebook CDN:
+    // In Facebook CDN, "-1" specifically designates profile photos / avatars
+    // (Content feed photos are "-6", e.g. /t39.30808-6/).
+    if lower.contains("-1/")
+        || lower.contains("-9/")
         || lower.contains("/t1.0-1/")
         || lower.contains("/t39.30808-1/")
         || lower.contains("/t1.30497-1/")
         || lower.contains("/t1.18169-1/")
-        || lower.contains("/c0."))
+        || lower.contains("/t31.0-1/")
+        || lower.contains("/v/t1.0-1/")
+        || lower.contains("_1.jpg")
+        || lower.contains("_1.png")
+        || lower.contains("_1.webp")
+        || lower.contains("_1_n.jpg")
+        || lower.contains("_1_a.jpg")
+    {
+        return false;
+    }
+
+    // 4. Square crop and avatar dimensions (Facebook profile pictures are 32px to 200px)
+    if lower.contains("/c0.")
+        || lower.contains("stp=dst-jpg_s")
+        || lower.contains("stp=c")
+        || lower.contains("32x32")
+        || lower.contains("36x36")
+        || lower.contains("40x40")
+        || lower.contains("48x48")
+        || lower.contains("50x50")
+        || lower.contains("60x60")
+        || lower.contains("72x72")
+        || lower.contains("80x80")
+        || lower.contains("96x96")
+        || lower.contains("100x100")
+        || lower.contains("115x115")
+        || lower.contains("120x120")
+        || lower.contains("150x150")
+        || lower.contains("160x160")
+        || lower.contains("200x200")
+    {
+        return false;
+    }
+
+    true
+}
+
+/// Strips everything starting from the comments / feedback section in Facebook HTML.
+/// This prevents extracting any commenter avatars, commenter attached images, or replies.
+pub fn strip_facebook_comments_section(html: &str) -> &str {
+    let comment_markers = [
+        "id=\"feedback_",
+        "class=\"feedback_",
+        "id=\"UFI2CommentsList\"",
+        "class=\"UFI2CommentsList\"",
+        "class=\"comment_list\"",
+        "id=\"comment_list\"",
+        "\"top_level_comments\":",
+        "\"comment_rendering_instance",
+        "\"feedback_context\":",
+        "class=\"_2b05\"",
+        "class=\"_2a_i\"",
+        "action=\"/ajax/ufi/add_comment.php\"",
+        "id=\"add_comment\"",
+        "data-testid=\"UFI2CommentsList/root\"",
+        "data-testid=\"UFI2Avatar/root\"",
+        "aria-label=\"Comments\"",
+        "aria-label=\"Comment by",
+        "aria-label=\"Comment\"",
+    ];
+    let mut min_idx = html.len();
+    for marker in &comment_markers {
+        if let Some(pos) = html.find(marker) {
+            if pos < min_idx {
+                min_idx = pos;
+            }
+        }
+    }
+    &html[..min_idx]
 }
 
 fn extract_media_id_param(url: &str) -> Option<String> {
@@ -1480,14 +1568,14 @@ fn extract_media_id_param(url: &str) -> Option<String> {
     None
 }
 
-/// Extracts high-resolution content images from HTML, filtering out avatars, emojis, and icons.
+/// Extracts high-resolution content images from HTML, filtering out avatars, emojis, and commenter profile pictures.
 pub fn extract_attached_images_from_html(html: &str, primary_images: &[String]) -> Vec<String> {
     let mut images = Vec::new();
 
-    // 1. Primary OpenGraph images
+    // 1. Primary OpenGraph images (validated to ensure they are valid content images)
     for img in primary_images {
         let cleaned = clean_facebook_cdn_url(img);
-        if !cleaned.is_empty() && !images.contains(&cleaned) {
+        if is_valid_fb_content_image(&cleaned) && !images.contains(&cleaned) {
             images.push(cleaned);
         }
     }
@@ -1516,6 +1604,7 @@ pub fn extract_attached_images_from_html(html: &str, primary_images: &[String]) 
     }
 
     // 3. Preload link tags (<link rel="preload" as="image" href="..." />)
+    // Preload tags in <head> only preload the post's photos, never comments.
     for cap in PRELOAD_IMAGE_RE.captures_iter(html) {
         let raw_url = cap.get(1).or_else(|| cap.get(2)).map(|m| m.as_str()).unwrap_or("");
         let cleaned = clean_facebook_cdn_url(raw_url);
@@ -1535,21 +1624,29 @@ pub fn extract_attached_images_from_html(html: &str, primary_images: &[String]) 
         }
     }
 
-    // 4. Lookaside URLs anywhere in HTML / JSON scripts
-    for mat in LOOKASIDE_IMAGE_RE.find_iter(html) {
-        let cleaned = clean_facebook_cdn_url(mat.as_str());
-        if let Some(mid) = extract_media_id_param(&cleaned) {
-            if !author_ids.contains(&mid) {
-                let standard_url = format!("https://lookaside.fbsbx.com/lookaside/crawler/media/?media_id={}", mid);
-                if !images.contains(&standard_url) {
-                    images.push(standard_url);
-                }
+    // Strip comments section so all following steps NEVER inspect comment data or commenter profile pictures
+    let post_html = strip_facebook_comments_section(html);
+
+    // 4. Extract structured post photo attachments from JSON scripts (before comments)
+    for cap in POST_PHOTO_URI_RE.captures_iter(post_html) {
+        if let Some(m) = cap.get(1) {
+            let cleaned = clean_facebook_cdn_url(m.as_str());
+            if is_valid_fb_content_image(&cleaned) && !images.contains(&cleaned) {
+                images.push(cleaned);
+            }
+        }
+    }
+    for cap in COMET_PHOTO_ATTACHMENT_RE.captures_iter(post_html) {
+        if let Some(m) = cap.get(1) {
+            let cleaned = clean_facebook_cdn_url(m.as_str());
+            if is_valid_fb_content_image(&cleaned) && !images.contains(&cleaned) {
+                images.push(cleaned);
             }
         }
     }
 
-    // 5. Direct scontent URLs
-    for mat in SCONTENT_IMAGE_RE.find_iter(html) {
+    // 5. Direct scontent URLs in the post body (before comments)
+    for mat in SCONTENT_IMAGE_RE.find_iter(post_html) {
         let cleaned = clean_facebook_cdn_url(mat.as_str());
         if is_valid_fb_content_image(&cleaned) && !images.contains(&cleaned) {
             images.push(cleaned);
@@ -1605,7 +1702,7 @@ pub async fn resolve_lookaside_images(
     let results = futures::future::join_all(futures).await;
     let mut resolved = Vec::with_capacity(results.len());
     for url in results {
-        if !resolved.contains(&url) {
+        if is_valid_fb_content_image(&url) && !resolved.contains(&url) {
             resolved.push(url);
         }
     }
@@ -3104,5 +3201,64 @@ mod tests {
         let res = call_facebook_post(json!({ "url": "https://notfacebook.com/posts/123" })).await.unwrap();
         assert_eq!(res["isError"], true);
         assert!(res["content"][0]["text"].as_str().unwrap().contains("Invalid domain"));
+    }
+
+    #[test]
+    fn test_is_valid_fb_content_image_filters_avatars_and_commenters() {
+        // Avatars / commenter profile pics that MUST be filtered out
+        assert!(!is_valid_fb_content_image("https://scontent.xx.fbcdn.net/v/t39.30808-1/12345_n.jpg"));
+        assert!(!is_valid_fb_content_image("https://scontent.xx.fbcdn.net/v/t1.0-1/12345_n.jpg"));
+        assert!(!is_valid_fb_content_image("https://scontent.xx.fbcdn.net/v/t1.30497-1/12345_n.jpg"));
+        assert!(!is_valid_fb_content_image("https://scontent.xx.fbcdn.net/v/t1.18169-1/12345_n.jpg"));
+        assert!(!is_valid_fb_content_image("https://scontent.xx.fbcdn.net/v/t39.30808-6/s50x50/123_n.jpg"));
+        assert!(!is_valid_fb_content_image("https://scontent.xx.fbcdn.net/v/t39.30808-6/p100x100/123_n.jpg"));
+        assert!(!is_valid_fb_content_image("https://scontent.xx.fbcdn.net/v/t39.30808-6/123_n.jpg?stp=dst-jpg_s150x150"));
+        assert!(!is_valid_fb_content_image("https://scontent.xx.fbcdn.net/v/t39.30808-6/123_n.jpg?stp=c0.0.50.50"));
+        assert!(!is_valid_fb_content_image("https://scontent.xx.fbcdn.net/v/t39.30808-6/c0.0.100.100/123_n.jpg"));
+        assert!(!is_valid_fb_content_image("https://scontent.xx.fbcdn.net/profile_pic/123_n.jpg"));
+        assert!(!is_valid_fb_content_image("https://scontent.xx.fbcdn.net/avatar_123.jpg"));
+        assert!(!is_valid_fb_content_image("https://static.xx.fbcdn.net/rsrc.php/v3/y1/r/123.png"));
+        assert!(!is_valid_fb_content_image("https://static.xx.fbcdn.net/images/emoji.php/v9/123.png"));
+
+        // Genuine post images that MUST be allowed
+        assert!(is_valid_fb_content_image("https://scontent.xx.fbcdn.net/v/t39.30808-6/462123456_987654321_n.jpg?_nc_cat=101"));
+        assert!(is_valid_fb_content_image("https://scontent.xx.fbcdn.net/v/t39.30808-6/462123456_987654321_n.jpg?stp=dst-jpg_p720x720&_nc_cat=101"));
+        assert!(is_valid_fb_content_image("https://scontent.xx.fbcdn.net/v/t39.30808-6/462123456_987654321_n.jpg?stp=dst-jpg_p960x960&_nc_cat=101"));
+    }
+
+    #[test]
+    fn test_extract_attached_images_excludes_comment_section() {
+        let html = r#"
+            <html>
+            <head>
+                <link rel="preload" as="image" href="https://scontent.xx.fbcdn.net/v/t39.30808-6/post_photo_1.jpg" />
+            </head>
+            <body>
+                <div class="userContentWrapper">
+                    <script type="application/json">{"photo_image":{"uri":"https:\/\/scontent.xx.fbcdn.net\/v\/t39.30808-6\/post_photo_2.jpg"}}</script>
+                </div>
+                <!-- Comments section follows -->
+                <div id="feedback_123" class="feedback">
+                    <div class="UFI2CommentsList">
+                        <img src="https://lookaside.fbsbx.com/lookaside/crawler/media/?media_id=999999" />
+                        <img src="https://scontent.xx.fbcdn.net/v/t39.30808-1/commenter_avatar.jpg" />
+                        <img src="https://scontent.xx.fbcdn.net/v/t39.30808-6/s50x50/commenter_thumb.jpg" />
+                    </div>
+                </div>
+            </body>
+            </html>
+        "#;
+        let og_images = vec!["https://scontent.xx.fbcdn.net/v/t39.30808-6/og_photo.jpg".to_string()];
+        let extracted = extract_attached_images_from_html(html, &og_images);
+
+        // Post photos should be present
+        assert!(extracted.contains(&"https://scontent.xx.fbcdn.net/v/t39.30808-6/og_photo.jpg".to_string()));
+        assert!(extracted.contains(&"https://scontent.xx.fbcdn.net/v/t39.30808-6/post_photo_1.jpg".to_string()));
+        assert!(extracted.contains(&"https://scontent.xx.fbcdn.net/v/t39.30808-6/post_photo_2.jpg".to_string()));
+
+        // NONE of the commenter avatars should be present
+        assert!(!extracted.iter().any(|img| img.contains("999999")));
+        assert!(!extracted.iter().any(|img| img.contains("commenter_avatar")));
+        assert!(!extracted.iter().any(|img| img.contains("commenter_thumb")));
     }
 }

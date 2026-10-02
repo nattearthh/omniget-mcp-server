@@ -77,7 +77,7 @@ pub async fn health_handler() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "application/json")],
         Json(HealthResponse {
             ok: true,
-            version: "v3.9-perf-cleanup",
+            version: "v4.0-filter-commenter-avatars",
         }),
     )
 }

@@ -1097,10 +1097,37 @@ async fn save_to_notion(
         .filter(|d| !d.trim().is_empty())
         .unwrap_or_else(|| "omniget-mcp-server-production-ccd1.up.railway.app".to_string());
 
+/// Filters out avatars, emojis, and commenter profile pictures before sending to Notion.
+fn is_notion_clip_image(url: &str) -> bool {
+    let lower = url.to_lowercase();
+    !(lower.contains("emoji.php")
+        || lower.contains("static.xx")
+        || lower.contains("rsrc.php")
+        || lower.contains("profile_pic")
+        || lower.contains("profile_picture")
+        || lower.contains("profile_photo")
+        || lower.contains("avatar")
+        || lower.contains("author_pic")
+        || lower.contains("-1/")
+        || lower.contains("/t1.0-1/")
+        || lower.contains("/t39.30808-1/")
+        || lower.contains("/c0.")
+        || lower.contains("stp=dst-jpg_s")
+        || lower.contains("stp=c")
+        || lower.contains("32x32")
+        || lower.contains("50x50")
+        || lower.contains("60x60")
+        || lower.contains("100x100")
+        || lower.contains("150x150")
+        || lower.contains("160x160")
+        || lower.contains("200x200"))
+}
+
     let valid_images: Vec<String> = content.images.iter()
         .filter(|img| {
             let s = img.as_str();
-            s.starts_with("http://") || s.starts_with("https://")
+            (s.starts_with("http://") || s.starts_with("https://"))
+                && is_notion_clip_image(s)
         })
         .map(|img| {
             let is_fb_cdn = img.contains("lookaside.fbsbx.com")
