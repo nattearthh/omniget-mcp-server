@@ -686,19 +686,6 @@ pub async fn clip_post_handler(body: Bytes) -> Response {
     (status, Json(result)).into_response()
 }
 
-// ── Generic Stub ─────────────────────────────────────────────────────────────
-
-/// Backward-compatible stub handler.
-#[allow(dead_code)]
-pub async fn rest_stub_handler() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        Json(json!({
-            "ok": true,
-            "status": "stub"
-        })),
-    )
-}
 
 // ============================================================================
 // OpenAPI 3.1.0 Specification Generator
@@ -737,9 +724,10 @@ pub fn build_openapi_spec() -> Value {
                                     "schema": {
                                         "type": "object",
                                         "properties": {
-                                            "ok": { "type": "boolean" }
+                                            "ok": { "type": "boolean" },
+                                            "version": { "type": "string" }
                                         },
-                                        "required": ["ok"]
+                                        "required": ["ok", "version"]
                                     }
                                 }
                             }
@@ -1427,6 +1415,107 @@ pub fn build_openapi_spec() -> Value {
                         },
                         "502": {
                             "description": "Bad gateway: upstream extraction failure"
+                        }
+                    }
+                }
+            },
+            "/api/clip": {
+                "get": {
+                    "summary": "Clip Web/Social Page to Notion (GET)",
+                    "description": "Scrapes target URL, summarizes with AI (Groq/OpenRouter), and saves to Notion database with duplicate detection.",
+                    "security": [
+                        { "BearerAuth": [] }
+                    ],
+                    "parameters": [
+                        {
+                            "name": "url",
+                            "in": "query",
+                            "required": true,
+                            "schema": { "type": "string" },
+                            "description": "Public URL to scrape, summarize, and clip to Notion"
+                        },
+                        {
+                            "name": "force",
+                            "in": "query",
+                            "required": false,
+                            "schema": { "type": "boolean" },
+                            "description": "Force re-clipping even if URL was previously saved in Notion database"
+                        },
+                        {
+                            "name": "notion_database_id",
+                            "in": "query",
+                            "required": false,
+                            "schema": { "type": "string" },
+                            "description": "Notion Database ID override"
+                        },
+                        {
+                            "name": "notion_api_key",
+                            "in": "query",
+                            "required": false,
+                            "schema": { "type": "string" },
+                            "description": "Notion Integration API Key override"
+                        },
+                        {
+                            "name": "openrouter_api_key",
+                            "in": "query",
+                            "required": false,
+                            "schema": { "type": "string" },
+                            "description": "LLM API Key override"
+                        },
+                        {
+                            "name": "model",
+                            "in": "query",
+                            "required": false,
+                            "schema": { "type": "string" },
+                            "description": "LLM model name override"
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "ClipResult object with title, notion_url, duplicate, and status"
+                        },
+                        "400": {
+                            "description": "Bad request: invalid input, scraping failure, or Notion error"
+                        },
+                        "401": {
+                            "description": "Unauthorized: missing or invalid Bearer token"
+                        }
+                    }
+                },
+                "post": {
+                    "summary": "Clip Web/Social Page to Notion (POST)",
+                    "description": "Scrapes target URL, summarizes with AI (Groq/OpenRouter), and saves to Notion database with duplicate detection.",
+                    "security": [
+                        { "BearerAuth": [] }
+                    ],
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "url": { "type": "string", "description": "Public URL to scrape and clip" },
+                                        "force": { "type": "boolean", "description": "Force re-clipping even if duplicate" },
+                                        "notion_database_id": { "type": "string", "description": "Notion Database ID override" },
+                                        "notion_api_key": { "type": "string", "description": "Notion Integration API Key override" },
+                                        "openrouter_api_key": { "type": "string", "description": "LLM API Key override" },
+                                        "model": { "type": "string", "description": "LLM model name override" }
+                                    },
+                                    "required": ["url"]
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "ClipResult object with title, notion_url, duplicate, and status"
+                        },
+                        "400": {
+                            "description": "Bad request: invalid input, scraping failure, or Notion error"
+                        },
+                        "401": {
+                            "description": "Unauthorized: missing or invalid Bearer token"
                         }
                     }
                 }

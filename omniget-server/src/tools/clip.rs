@@ -723,19 +723,23 @@ async fn find_existing_notion_page(
     token_override: Option<&str>,
     db_override: Option<&str>,
 ) -> Option<ExistingPageInfo> {
-    let token = token_override
+    let token = match token_override
         .filter(|t| !t.trim().is_empty())
         .map(String::from)
-        .or_else(|| std::env::var("NOTION_API_KEY").ok())
-        .unwrap_or_else(|| {
-            ["ntn", "_1570776709682juLGFqQzH9", "HyhvLlwBTgyor41P99jy479"].concat()
-        });
+        .or_else(|| std::env::var("NOTION_API_KEY").ok().filter(|t| !t.trim().is_empty()))
+    {
+        Some(t) => t,
+        None => return None,
+    };
 
-    let db_id = db_override
+    let db_id = match db_override
         .filter(|d| !d.trim().is_empty())
         .map(String::from)
-        .or_else(|| std::env::var("NOTION_DATABASE_ID").ok())
-        .unwrap_or_else(|| "36d3a841-8138-8049-99fa-c5d13fa9bac7".to_string());
+        .or_else(|| std::env::var("NOTION_DATABASE_ID").ok().filter(|d| !d.trim().is_empty()))
+    {
+        Some(d) => d,
+        None => return None,
+    };
 
     let mut valid_targets: Vec<String> = Vec::new();
     for t in targets {
@@ -844,16 +848,17 @@ async fn mark_duplicate_notion_page(
     current_title: &str,
     token_override: Option<&str>,
 ) -> String {
-    let token = token_override
-        .filter(|t| !t.trim().is_empty())
-        .map(String::from)
-        .or_else(|| std::env::var("NOTION_API_KEY").ok())
-        .unwrap_or_else(|| {
-            ["ntn", "_1570776709682juLGFqQzH9", "HyhvLlwBTgyor41P99jy479"].concat()
-        });
-
     let clean_title = current_title.trim_start_matches("🔄 เคยบันทึกไปแล้ว: ").trim();
     let new_title = format!("🔄 เคยบันทึกไปแล้ว: {}", clean_title);
+
+    let token = match token_override
+        .filter(|t| !t.trim().is_empty())
+        .map(String::from)
+        .or_else(|| std::env::var("NOTION_API_KEY").ok().filter(|t| !t.trim().is_empty()))
+    {
+        Some(t) => t,
+        None => return new_title,
+    };
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -897,16 +902,14 @@ async fn save_to_notion(
     let token = token_override
         .filter(|t| !t.trim().is_empty())
         .map(String::from)
-        .or_else(|| std::env::var("NOTION_API_KEY").ok())
-        .unwrap_or_else(|| {
-            ["ntn", "_1570776709682juLGFqQzH9", "HyhvLlwBTgyor41P99jy479"].concat()
-        });
+        .or_else(|| std::env::var("NOTION_API_KEY").ok().filter(|t| !t.trim().is_empty()))
+        .ok_or_else(|| "Missing NOTION_API_KEY in environment or request".to_string())?;
 
     let db_id = db_override
         .filter(|d| !d.trim().is_empty())
         .map(String::from)
-        .or_else(|| std::env::var("NOTION_DATABASE_ID").ok())
-        .unwrap_or_else(|| "36d3a841-8138-8049-99fa-c5d13fa9bac7".to_string());
+        .or_else(|| std::env::var("NOTION_DATABASE_ID").ok().filter(|d| !d.trim().is_empty()))
+        .ok_or_else(|| "Missing NOTION_DATABASE_ID in environment or request".to_string())?;
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -1321,6 +1324,9 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
         };
     }
 
+    // Resolve Notion API key from either notion_api_key or token field
+    let notion_key = args.notion_api_key.as_deref().or(args.token.as_deref());
+
     // Step 0: Fast Pre-check for existing duplicate link in Notion unless force=true
     if args.force != Some(true) {
         let norm_url = normalize_source_url(trimmed_url);
@@ -1332,7 +1338,7 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
 
         if let Some(existing) = find_existing_notion_page(
             &candidates,
-            args.notion_api_key.as_deref(),
+            notion_key,
             args.notion_database_id.as_deref(),
         )
         .await
@@ -1345,7 +1351,7 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
             let updated_title = mark_duplicate_notion_page(
                 &existing.page_id,
                 &existing.title,
-                args.notion_api_key.as_deref(),
+                notion_key,
             )
             .await;
 
@@ -1380,7 +1386,7 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
 
         if let Some(existing) = find_existing_notion_page(
             &candidates,
-            args.notion_api_key.as_deref(),
+            notion_key,
             args.notion_database_id.as_deref(),
         )
         .await
@@ -1393,7 +1399,7 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
             let updated_title = mark_duplicate_notion_page(
                 &existing.page_id,
                 &existing.title,
-                args.notion_api_key.as_deref(),
+                notion_key,
             )
             .await;
 
@@ -1430,7 +1436,7 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
     match save_to_notion(
         &content,
         &summary,
-        args.notion_api_key.as_deref(),
+        notion_key,
         args.notion_database_id.as_deref(),
     )
     .await

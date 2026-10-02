@@ -22,9 +22,6 @@ use url::Url;
 pub const FB_CRAWLER_USER_AGENT: &str =
     "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)";
 
-pub const DESKTOP_USER_AGENT: &str =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-
 static HASHTAG_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"#([a-zA-Z0-9_\u{0080}-\u{ffff}]+)")
         .expect("Valid hashtag extraction regex")
@@ -1572,51 +1569,44 @@ pub async fn resolve_lookaside_images(
     client: &reqwest::Client,
     images: &[String],
 ) -> Vec<String> {
-    let mut resolved = Vec::new();
-
-    for img in images {
-        if img.contains("lookaside.fbsbx.com") || img.contains("static.xx.fbcdn.net") {
-            // Follow redirect to get the actual scontent URL
-            match client
-                .get(img)
-                .header("User-Agent", FB_CRAWLER_USER_AGENT)
-                .send()
-                .await
-            {
-                Ok(resp) => {
-                    let final_url = resp.url().as_str().to_string();
-                    if final_url.contains("scontent") {
+    let futures = images.iter().map(|img| {
+        let client = client.clone();
+        let img = img.clone();
+        async move {
+            if img.contains("lookaside.fbsbx.com") || img.contains("static.xx.fbcdn.net") {
+                match client
+                    .get(&img)
+                    .header("User-Agent", FB_CRAWLER_USER_AGENT)
+                    .send()
+                    .await
+                {
+                    Ok(resp) => {
+                        let final_url = resp.url().as_str().to_string();
                         tracing::debug!(
                             "[facebook] Resolved lookaside image: {} -> {}",
                             img, final_url
                         );
-                        if !resolved.contains(&final_url) {
-                            resolved.push(final_url);
-                        }
-                    } else {
+                        final_url
+                    }
+                    Err(e) => {
                         tracing::debug!(
-                            "[facebook] Lookaside redirect did not yield scontent URL: {} -> {}",
-                            img, final_url
+                            "[facebook] Failed to resolve lookaside image {}: {}",
+                            img, e
                         );
-                        // Still include it as a last resort; Notion might handle it
-                        if !resolved.contains(&final_url) {
-                            resolved.push(final_url);
-                        }
+                        img
                     }
                 }
-                Err(e) => {
-                    tracing::debug!(
-                        "[facebook] Failed to resolve lookaside image {}: {}",
-                        img, e
-                    );
-                    // Skip unresolvable URLs
-                }
+            } else {
+                img
             }
-        } else {
-            // Non-lookaside URL (already a scontent URL or external)
-            if !resolved.contains(img) {
-                resolved.push(img.clone());
-            }
+        }
+    });
+
+    let results = futures::future::join_all(futures).await;
+    let mut resolved = Vec::with_capacity(results.len());
+    for url in results {
+        if !resolved.contains(&url) {
+            resolved.push(url);
         }
     }
 
