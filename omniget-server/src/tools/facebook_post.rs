@@ -144,6 +144,16 @@ static SCONTENT_IMAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("Valid scontent image extraction regex")
 });
 
+static LOOKASIDE_IMAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"https:(?:\\?/){2}lookaside\.fbsbx\.com(?:\\?/)+lookaside(?:\\?/)+crawler(?:\\?/)+media(?:\\?/)+\?[^"'\s<>]+"#)
+        .expect("Valid lookaside image extraction regex")
+});
+
+static PRELOAD_IMAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"<link[^>]+(?:as="image"[^>]+href="([^"]+)"|href="([^"]+)"[^>]+as="image")[^>]*>"#)
+        .expect("Valid preload image regex")
+});
+
 static HTML_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"<[^>]+>").expect("Valid HTML tag stripping regex")
 });
@@ -1241,6 +1251,7 @@ pub struct OpenGraphMeta {
     pub title: Option<String>,
     pub description: Option<String>,
     pub image: Option<String>,
+    pub images: Vec<String>,
     pub video: Option<String>,
     pub url: Option<String>,
     pub og_type: Option<String>,
@@ -1299,8 +1310,16 @@ fn populate_og_field(meta: &mut OpenGraphMeta, key: &str, val: String) {
     match key {
         "title" if meta.title.is_none() => meta.title = Some(val),
         "description" if meta.description.is_none() => meta.description = Some(val),
-        "image" | "image:url" | "image:secure_url" if meta.image.is_none() => {
-            meta.image = Some(clean_facebook_cdn_url(&val));
+        "image" | "image:url" | "image:secure_url" => {
+            let cleaned = clean_facebook_cdn_url(&val);
+            if !cleaned.is_empty() {
+                if meta.image.is_none() {
+                    meta.image = Some(cleaned.clone());
+                }
+                if !meta.images.contains(&cleaned) {
+                    meta.images.push(cleaned);
+                }
+            }
         }
         "video" | "video:url" | "video:secure_url" if meta.video.is_none() => {
             meta.video = Some(clean_facebook_cdn_url(&val));
@@ -1429,48 +1448,113 @@ pub fn extract_audio_stream_from_html(html: &str) -> Option<String> {
     None
 }
 
+/// Helper to check if a content image URL is valid (filters out icons, avatars, badges, thumbnails).
+fn is_valid_fb_content_image(url: &str) -> bool {
+    let lower = url.to_lowercase();
+    !(lower.contains("emoji.php")
+        || lower.contains("static.xx")
+        || lower.contains("rsrc.php")
+        || lower.contains("/p50x50/")
+        || lower.contains("/s50x50/")
+        || lower.contains("/p100x100/")
+        || lower.contains("/s100x100/")
+        || lower.contains("/p160x160/")
+        || lower.contains("/s160x160/")
+        || lower.contains("/p200x200/")
+        || lower.contains("/s200x200/")
+        || lower.contains("/p320x320/")
+        || lower.contains("/s320x320/")
+        || lower.contains("/p480x480/")
+        || lower.contains("/s480x480/")
+        || lower.contains("-1/")
+        || lower.contains("/t1.0-1/")
+        || lower.contains("/t39.30808-1/")
+        || lower.contains("/t1.30497-1/")
+        || lower.contains("/t1.18169-1/")
+        || lower.contains("/c0."))
+}
+
+fn extract_media_id_param(url: &str) -> Option<String> {
+    if let Ok(re) = Regex::new(r"media_id=(\d+)") {
+        if let Some(cap) = re.captures(url) {
+            return cap.get(1).map(|m| m.as_str().to_string());
+        }
+    }
+    None
+}
+
 /// Extracts high-resolution content images from HTML, filtering out avatars, emojis, and icons.
-pub fn extract_attached_images_from_html(html: &str, primary_image: Option<&str>) -> Vec<String> {
+pub fn extract_attached_images_from_html(html: &str, primary_images: &[String]) -> Vec<String> {
     let mut images = Vec::new();
 
-    if let Some(img) = primary_image {
+    // 1. Primary OpenGraph images
+    for img in primary_images {
         let cleaned = clean_facebook_cdn_url(img);
-        if !cleaned.is_empty() {
+        if !cleaned.is_empty() && !images.contains(&cleaned) {
             images.push(cleaned);
         }
     }
 
+    // 2. Identify author / page ID to filter out avatar lookaside URLs
+    let mut author_ids = Vec::new();
+    if let Ok(re) = Regex::new(r#""actorID":\s*"?(\d+)"?"#) {
+        for cap in re.captures_iter(html) {
+            if let Some(m) = cap.get(1) {
+                let id = m.as_str().to_string();
+                if id != "0" && !author_ids.contains(&id) {
+                    author_ids.push(id);
+                }
+            }
+        }
+    }
+    if let Ok(re) = Regex::new(r#""owner":\s*\{[^}]*"id":\s*"(\d+)""#) {
+        for cap in re.captures_iter(html) {
+            if let Some(m) = cap.get(1) {
+                let id = m.as_str().to_string();
+                if id != "0" && !author_ids.contains(&id) {
+                    author_ids.push(id);
+                }
+            }
+        }
+    }
+
+    // 3. Preload link tags (<link rel="preload" as="image" href="..." />)
+    for cap in PRELOAD_IMAGE_RE.captures_iter(html) {
+        let raw_url = cap.get(1).or_else(|| cap.get(2)).map(|m| m.as_str()).unwrap_or("");
+        let cleaned = clean_facebook_cdn_url(raw_url);
+        if cleaned.contains("lookaside.fbsbx.com") {
+            if let Some(mid) = extract_media_id_param(&cleaned) {
+                if !author_ids.contains(&mid) {
+                    let standard_url = format!("https://lookaside.fbsbx.com/lookaside/crawler/media/?media_id={}", mid);
+                    if !images.contains(&standard_url) {
+                        images.push(standard_url);
+                    }
+                }
+            }
+        } else if cleaned.contains("scontent") {
+            if is_valid_fb_content_image(&cleaned) && !images.contains(&cleaned) {
+                images.push(cleaned);
+            }
+        }
+    }
+
+    // 4. Lookaside URLs anywhere in HTML / JSON scripts
+    for mat in LOOKASIDE_IMAGE_RE.find_iter(html) {
+        let cleaned = clean_facebook_cdn_url(mat.as_str());
+        if let Some(mid) = extract_media_id_param(&cleaned) {
+            if !author_ids.contains(&mid) {
+                let standard_url = format!("https://lookaside.fbsbx.com/lookaside/crawler/media/?media_id={}", mid);
+                if !images.contains(&standard_url) {
+                    images.push(standard_url);
+                }
+            }
+        }
+    }
+
+    // 5. Direct scontent URLs
     for mat in SCONTENT_IMAGE_RE.find_iter(html) {
         let cleaned = clean_facebook_cdn_url(mat.as_str());
-
-        // Filter out small thumbnails, profile badges, avatars, and emojis
-        let lower = cleaned.to_lowercase();
-        if lower.contains("emoji.php")
-            || lower.contains("static.xx")
-            || lower.contains("rsrc.php")
-            || lower.contains("/p50x50/")
-            || lower.contains("/s50x50/")
-            || lower.contains("/p100x100/")
-            || lower.contains("/s100x100/")
-            || lower.contains("/p160x160/")
-            || lower.contains("/s160x160/")
-            || lower.contains("/p200x200/")
-            || lower.contains("/s200x200/")
-            || lower.contains("/p320x320/")
-            || lower.contains("/s320x320/")
-            || lower.contains("/p480x480/")
-            || lower.contains("/s480x480/")
-            || lower.contains("-1/")
-            || lower.contains("/t1.0-1/")
-            || lower.contains("/t39.30808-1/")
-            || lower.contains("/t1.30497-1/")
-            || lower.contains("/t1.18169-1/")
-            || lower.contains("/c0.")
-        {
-            continue;
-        }
-
-        if !images.contains(&cleaned) {
+        if is_valid_fb_content_image(&cleaned) && !images.contains(&cleaned) {
             images.push(cleaned);
         }
     }
@@ -2263,7 +2347,7 @@ pub async fn extract_facebook_post(input: &str) -> Result<FacebookPost, Facebook
     }
 
     // Step 5: Extract attached images & maximize resolution
-    let raw_images = extract_attached_images_from_html(&html, og.image.as_deref());
+    let raw_images = extract_attached_images_from_html(&html, &og.images);
 
     // Step 5.5: Resolve lookaside.fbsbx.com URLs → scontent CDN URLs for Notion compatibility
     let images = resolve_lookaside_images(&client, &raw_images).await;

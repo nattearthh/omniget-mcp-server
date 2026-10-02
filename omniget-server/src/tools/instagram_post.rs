@@ -1550,6 +1550,41 @@ fn is_embed_private_or_login_required(html: &str) -> bool {
         || stripped.contains("accounts/login")
 }
 
+/// Helper to recursively search a JSON Value for a media node (shortcode_media or xdt_shortcode_media)
+pub fn find_media_node<'a>(val: &'a Value) -> Option<&'a Value> {
+    if let Some(media) = val
+        .get("shortcode_media")
+        .or_else(|| val.get("xdt_shortcode_media"))
+        .or_else(|| val.pointer("/gql_data/shortcode_media"))
+        .or_else(|| val.pointer("/gql_data/xdt_shortcode_media"))
+        .or_else(|| val.pointer("/graphql/shortcode_media"))
+        .or_else(|| val.pointer("/data/shortcode_media"))
+        .or_else(|| val.pointer("/data/xdt_shortcode_media"))
+    {
+        if media.get("display_url").is_some()
+            || media.get("edge_sidecar_to_children").is_some()
+            || media.get("owner").is_some()
+        {
+            return Some(media);
+        }
+    }
+
+    if let Some(obj) = val.as_object() {
+        for (_k, v) in obj {
+            if let Some(found) = find_media_node(v) {
+                return Some(found);
+            }
+        }
+    } else if let Some(arr) = val.as_array() {
+        for v in arr {
+            if let Some(found) = find_media_node(v) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 /// Parses public captioned embed page HTML into an `InstagramPost`.
 pub fn parse_embed_html(html: &str, shortcode: &str) -> Result<InstagramPost, InstagramExtractError> {
 
@@ -1560,21 +1595,13 @@ pub fn parse_embed_html(html: &str, shortcode: &str) -> Result<InstagramPost, In
                 let full_json_str = format!("\"{}\"", escaped_str.as_str());
                 if let Ok(context_json) = serde_json::from_str::<String>(&full_json_str) {
                     if let Ok(context) = serde_json::from_str::<Value>(&context_json) {
-                        if let Some(media) = context
-                            .get("shortcode_media")
-                            .or_else(|| context.get("xdt_shortcode_media"))
-                            .or_else(|| context.pointer("/graphql/shortcode_media"))
-                            .or_else(|| context.pointer("/data/xdt_shortcode_media"))
-                            .or_else(|| context.pointer("/data/shortcode_media"))
-                            .filter(|m| !m.is_null())
-                            .or_else(|| {
-                                if context.get("owner").is_some() || context.get("display_url").is_some() {
-                                    Some(&context)
-                                } else {
-                                    None
-                                }
-                            })
-                        {
+                        if let Some(media) = find_media_node(&context).or_else(|| {
+                            if context.get("owner").is_some() || context.get("display_url").is_some() {
+                                Some(&context)
+                            } else {
+                                None
+                            }
+                        }) {
                             return parse_gql_media_node(media, shortcode);
                         }
                     }
@@ -1588,12 +1615,7 @@ pub fn parse_embed_html(html: &str, shortcode: &str) -> Result<InstagramPost, In
         if let Some(cap) = re.captures(html) {
             if let Some(json_slice) = cap.get(1) {
                 if let Ok(val) = serde_json::from_str::<Value>(json_slice.as_str()) {
-                    if let Some(media) = val
-                        .get("graphql")
-                        .and_then(|g| g.get("shortcode_media"))
-                        .or_else(|| val.get("shortcode_media"))
-                        .or_else(|| val.get("xdt_shortcode_media"))
-                    {
+                    if let Some(media) = find_media_node(&val) {
                         return parse_gql_media_node(media, shortcode);
                     }
                 }
@@ -1601,16 +1623,16 @@ pub fn parse_embed_html(html: &str, shortcode: &str) -> Result<InstagramPost, In
         }
     }
 
-    // Pattern 3: Embedded script tag data-sjs
-    if let Ok(re) = Regex::new(r#"<script[^>]+data-sjs[^>]*>(.*?)</script>"#) {
+    // Pattern 3: Embedded script tag containing JSON or data-sjs
+    if let Ok(re) = Regex::new(r#"<script[^>]*>(.*?)</script>"#) {
         for cap in re.captures_iter(html) {
             if let Some(script_content) = cap.get(1) {
-                if let Ok(val) = serde_json::from_str::<Value>(script_content.as_str()) {
-                    if let Some(media) = val
-                        .pointer("/require/0/3/0/__bbox/result/data/xdt_shortcode_media")
-                        .or_else(|| val.pointer("/require/0/3/0/__bbox/result/data/shortcode_media"))
-                    {
-                        return parse_gql_media_node(media, shortcode);
+                let s = script_content.as_str();
+                if s.contains("shortcode_media") || s.contains("xdt_shortcode_media") {
+                    if let Ok(val) = serde_json::from_str::<Value>(s) {
+                        if let Some(media) = find_media_node(&val) {
+                            return parse_gql_media_node(media, shortcode);
+                        }
                     }
                 }
             }
@@ -1685,6 +1707,34 @@ pub fn parse_embed_html(html: &str, shortcode: &str) -> Result<InstagramPost, In
             audio_url: None,
             has_audio: false,
         });
+    }
+
+    // In Pattern 4 DOM fallback: If photo post, check if additional carousel slide images exist in the HTML
+    if !is_video {
+        if let Ok(cdn_img_re) = Regex::new(r#"https:(?:\\?/){2}[^"'\s<>]+\.cdninstagram\.com(?:\\?/)+v(?:\\?/)+[^"'\s<>]+\.(?:jpg|jpeg|png|webp)[^"'\s<>]*"#) {
+            for m in cdn_img_re.find_iter(html) {
+                let cleaned = clean_media_url(m.as_str());
+                let lower = cleaned.to_lowercase();
+                if lower.contains("s150x150") || lower.contains("s320x320") || lower.contains("/c0.") || lower.contains("profile_pic") {
+                    continue;
+                }
+                if !images.contains(&cleaned) {
+                    images.push(cleaned.clone());
+                    media_items.push(InstagramMediaItem {
+                        id: Some(shortcode.to_string()),
+                        media_type: "photo".to_string(),
+                        url: cleaned,
+                        width: None,
+                        height: None,
+                        thumbnail_url: None,
+                        is_video: false,
+                        duration_secs: None,
+                        audio_url: None,
+                        has_audio: false,
+                    });
+                }
+            }
+        }
     }
 
     let author = InstagramAuthor {
