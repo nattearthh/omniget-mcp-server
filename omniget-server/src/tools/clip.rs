@@ -13,7 +13,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use crate::tools::{
-    facebook_post::extract_facebook_post,
+    facebook_post::{extract_facebook_post, extract_fb_photo_id},
     instagram_post::extract_instagram_post,
     web_markdown::web_to_markdown,
     x_extract::extract_thread,
@@ -1121,44 +1121,47 @@ fn is_notion_clip_image(url: &str) -> bool {
 }
 
     let mut seen_clip_ids = Vec::new();
-    let valid_images: Vec<String> = content.images.iter()
-        .filter(|img| {
-            let s = img.as_str();
-            (s.starts_with("http://") || s.starts_with("https://"))
-                && is_notion_clip_image(s)
-        })
-        .filter(|img| {
-            let s = img.as_str();
-            if let Some(pid) = crate::tools::facebook_post::extract_fb_photo_id(s) {
-                if seen_clip_ids.contains(&pid) {
-                    return false;
-                }
-                seen_clip_ids.push(pid);
-                true
-            } else {
-                let base = s.split('?').next().unwrap_or(s).to_string();
-                if seen_clip_ids.contains(&base) {
-                    return false;
-                }
-                seen_clip_ids.push(base);
-                true
-            }
-        })
-        .map(|img| {
-            let is_fb_cdn = img.contains("lookaside.fbsbx.com")
-                || img.contains("fbcdn.net")
-                || img.contains("fbsbx.com")
-                || img.contains("cdninstagram.com")
-                || img.contains("instagram.com");
+    let mut valid_images = Vec::new();
+    for img in &content.images {
+        let s = img.as_str();
+        if !(s.starts_with("http://") || s.starts_with("https://")) || !is_notion_clip_image(s) {
+            continue;
+        }
 
-            if is_fb_cdn {
-                let encoded: String = url::form_urlencoded::byte_serialize(img.as_bytes()).collect();
-                format!("https://{}/api/proxy/image?url={}", server_domain, encoded)
+        let is_dup = if let Some(pid) = extract_fb_photo_id(s) {
+            if seen_clip_ids.contains(&pid) {
+                true
             } else {
-                img.clone()
+                seen_clip_ids.push(pid);
+                false
             }
-        })
-        .collect();
+        } else {
+            let base = s.split('?').next().unwrap_or(s).to_string();
+            if seen_clip_ids.contains(&base) {
+                true
+            } else {
+                seen_clip_ids.push(base);
+                false
+            }
+        };
+
+        if is_dup {
+            continue;
+        }
+
+        let is_fb_cdn = img.contains("lookaside.fbsbx.com")
+            || img.contains("fbcdn.net")
+            || img.contains("fbsbx.com")
+            || img.contains("cdninstagram.com")
+            || img.contains("instagram.com");
+
+        if is_fb_cdn {
+            let encoded: String = url::form_urlencoded::byte_serialize(img.as_bytes()).collect();
+            valid_images.push(format!("https://{}/api/proxy/image?url={}", server_domain, encoded));
+        } else {
+            valid_images.push(img.clone());
+        }
+    }
 
     if !valid_images.is_empty() {
         children.push(json!({

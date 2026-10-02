@@ -1588,35 +1588,39 @@ pub fn extract_fb_photo_id(url: &str) -> Option<String> {
     None
 }
 
+fn add_unique_fb_image(
+    images: &mut Vec<String>,
+    seen_photo_ids: &mut Vec<String>,
+    raw_url: &str,
+) {
+    let cleaned = clean_facebook_cdn_url(raw_url);
+    if !is_valid_fb_content_image(&cleaned) {
+        return;
+    }
+
+    if let Some(photo_id) = extract_fb_photo_id(&cleaned) {
+        if let Some(pos) = seen_photo_ids.iter().position(|id| id == &photo_id) {
+            // If previous image was lookaside and current is direct scontent, upgrade
+            if images[pos].contains("lookaside.fbsbx.com") && cleaned.contains("scontent") {
+                images[pos] = cleaned;
+            }
+            return;
+        }
+        seen_photo_ids.push(photo_id);
+        images.push(cleaned);
+    } else if !images.contains(&cleaned) {
+        images.push(cleaned);
+    }
+}
+
 /// Extracts high-resolution content images from HTML, filtering out avatars, emojis, and commenter profile pictures.
 pub fn extract_attached_images_from_html(html: &str, primary_images: &[String]) -> Vec<String> {
     let mut images = Vec::new();
     let mut seen_photo_ids = Vec::new();
 
-    let mut add_image = |raw_url: &str| {
-        let cleaned = clean_facebook_cdn_url(raw_url);
-        if !is_valid_fb_content_image(&cleaned) {
-            return;
-        }
-
-        if let Some(photo_id) = extract_fb_photo_id(&cleaned) {
-            if let Some(pos) = seen_photo_ids.iter().position(|id| id == &photo_id) {
-                // If previous image was lookaside and current is direct scontent, upgrade
-                if images[pos].contains("lookaside.fbsbx.com") && cleaned.contains("scontent") {
-                    images[pos] = cleaned;
-                }
-                return;
-            }
-            seen_photo_ids.push(photo_id);
-            images.push(cleaned);
-        } else if !images.contains(&cleaned) {
-            images.push(cleaned);
-        }
-    };
-
     // 1. Primary OpenGraph images (validated to ensure they are valid content images)
     for img in primary_images {
-        add_image(img);
+        add_unique_fb_image(&mut images, &mut seen_photo_ids, img);
     }
 
     // 2. Identify author / page ID to filter out avatar lookaside URLs
@@ -1651,11 +1655,11 @@ pub fn extract_attached_images_from_html(html: &str, primary_images: &[String]) 
             if let Some(mid) = extract_media_id_param(&cleaned) {
                 if !author_ids.contains(&mid) {
                     let standard_url = format!("https://lookaside.fbsbx.com/lookaside/crawler/media/?media_id={}", mid);
-                    add_image(&standard_url);
+                    add_unique_fb_image(&mut images, &mut seen_photo_ids, &standard_url);
                 }
             }
         } else if cleaned.contains("scontent") {
-            add_image(&cleaned);
+            add_unique_fb_image(&mut images, &mut seen_photo_ids, &cleaned);
         }
     }
 
@@ -1665,12 +1669,12 @@ pub fn extract_attached_images_from_html(html: &str, primary_images: &[String]) 
     // 4. Extract structured post photo attachments from JSON scripts (before comments)
     for cap in POST_PHOTO_URI_RE.captures_iter(post_html) {
         if let Some(m) = cap.get(1) {
-            add_image(m.as_str());
+            add_unique_fb_image(&mut images, &mut seen_photo_ids, m.as_str());
         }
     }
     for cap in COMET_PHOTO_ATTACHMENT_RE.captures_iter(post_html) {
         if let Some(m) = cap.get(1) {
-            add_image(m.as_str());
+            add_unique_fb_image(&mut images, &mut seen_photo_ids, m.as_str());
         }
     }
 
