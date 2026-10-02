@@ -1568,16 +1568,55 @@ fn extract_media_id_param(url: &str) -> Option<String> {
     None
 }
 
+/// Extracts the unique Facebook Photo / Media ID from a lookaside or scontent URL.
+pub fn extract_fb_photo_id(url: &str) -> Option<String> {
+    // 1. Lookaside crawler media_id parameter: ?media_id=123456789
+    if let Some(mid) = extract_media_id_param(url) {
+        return Some(mid);
+    }
+
+    // 2. Facebook CDN filename format:
+    // .../462123456_987654321_123456789_n.jpg or .../462123456_n.jpg
+    let path = url.split('?').next().unwrap_or(url);
+    if let Some(filename) = path.rsplit('/').next() {
+        let digits: String = filename.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.len() >= 6 {
+            return Some(digits);
+        }
+    }
+
+    None
+}
+
 /// Extracts high-resolution content images from HTML, filtering out avatars, emojis, and commenter profile pictures.
 pub fn extract_attached_images_from_html(html: &str, primary_images: &[String]) -> Vec<String> {
     let mut images = Vec::new();
+    let mut seen_photo_ids = Vec::new();
+
+    let mut add_image = |raw_url: &str| {
+        let cleaned = clean_facebook_cdn_url(raw_url);
+        if !is_valid_fb_content_image(&cleaned) {
+            return;
+        }
+
+        if let Some(photo_id) = extract_fb_photo_id(&cleaned) {
+            if let Some(pos) = seen_photo_ids.iter().position(|id| id == &photo_id) {
+                // If previous image was lookaside and current is direct scontent, upgrade
+                if images[pos].contains("lookaside.fbsbx.com") && cleaned.contains("scontent") {
+                    images[pos] = cleaned;
+                }
+                return;
+            }
+            seen_photo_ids.push(photo_id);
+            images.push(cleaned);
+        } else if !images.contains(&cleaned) {
+            images.push(cleaned);
+        }
+    };
 
     // 1. Primary OpenGraph images (validated to ensure they are valid content images)
     for img in primary_images {
-        let cleaned = clean_facebook_cdn_url(img);
-        if is_valid_fb_content_image(&cleaned) && !images.contains(&cleaned) {
-            images.push(cleaned);
-        }
+        add_image(img);
     }
 
     // 2. Identify author / page ID to filter out avatar lookaside URLs
@@ -1612,15 +1651,11 @@ pub fn extract_attached_images_from_html(html: &str, primary_images: &[String]) 
             if let Some(mid) = extract_media_id_param(&cleaned) {
                 if !author_ids.contains(&mid) {
                     let standard_url = format!("https://lookaside.fbsbx.com/lookaside/crawler/media/?media_id={}", mid);
-                    if !images.contains(&standard_url) {
-                        images.push(standard_url);
-                    }
+                    add_image(&standard_url);
                 }
             }
         } else if cleaned.contains("scontent") {
-            if is_valid_fb_content_image(&cleaned) && !images.contains(&cleaned) {
-                images.push(cleaned);
-            }
+            add_image(&cleaned);
         }
     }
 
@@ -1630,28 +1665,16 @@ pub fn extract_attached_images_from_html(html: &str, primary_images: &[String]) 
     // 4. Extract structured post photo attachments from JSON scripts (before comments)
     for cap in POST_PHOTO_URI_RE.captures_iter(post_html) {
         if let Some(m) = cap.get(1) {
-            let cleaned = clean_facebook_cdn_url(m.as_str());
-            if is_valid_fb_content_image(&cleaned) && !images.contains(&cleaned) {
-                images.push(cleaned);
-            }
+            add_image(m.as_str());
         }
     }
     for cap in COMET_PHOTO_ATTACHMENT_RE.captures_iter(post_html) {
         if let Some(m) = cap.get(1) {
-            let cleaned = clean_facebook_cdn_url(m.as_str());
-            if is_valid_fb_content_image(&cleaned) && !images.contains(&cleaned) {
-                images.push(cleaned);
-            }
+            add_image(m.as_str());
         }
     }
 
-    // 5. Direct scontent URLs in the post body (before comments)
-    for mat in SCONTENT_IMAGE_RE.find_iter(post_html) {
-        let cleaned = clean_facebook_cdn_url(mat.as_str());
-        if is_valid_fb_content_image(&cleaned) && !images.contains(&cleaned) {
-            images.push(cleaned);
-        }
-    }
+    // Step 5 removed: SCONTENT_IMAGE_RE global scan eliminated to prevent matching unrelated sidebar posts & cover photos.
 
     images
 }
@@ -1701,8 +1724,18 @@ pub async fn resolve_lookaside_images(
 
     let results = futures::future::join_all(futures).await;
     let mut resolved = Vec::with_capacity(results.len());
+    let mut seen_photo_ids = Vec::new();
     for url in results {
-        if is_valid_fb_content_image(&url) && !resolved.contains(&url) {
+        if !is_valid_fb_content_image(&url) {
+            continue;
+        }
+        if let Some(pid) = extract_fb_photo_id(&url) {
+            if seen_photo_ids.contains(&pid) {
+                continue;
+            }
+            seen_photo_ids.push(pid);
+            resolved.push(url);
+        } else if !resolved.contains(&url) {
             resolved.push(url);
         }
     }
@@ -3260,5 +3293,50 @@ mod tests {
         assert!(!extracted.iter().any(|img| img.contains("999999")));
         assert!(!extracted.iter().any(|img| img.contains("commenter_avatar")));
         assert!(!extracted.iter().any(|img| img.contains("commenter_thumb")));
+    }
+
+    #[test]
+    fn test_deduplicate_single_photo_post_images() {
+        let og_images = vec![
+            "https://lookaside.fbsbx.com/lookaside/crawler/media/?media_id=9876543210123".to_string(),
+        ];
+        let html = r#"
+            <html>
+            <head>
+                <link rel="preload" as="image" href="https://scontent.xx.fbcdn.net/v/t39.30808-6/s960x960/9876543210123_111222_n.jpg" />
+            </head>
+            <body>
+                <script type="application/json">{"photo_image":{"uri":"https:\/\/scontent.xx.fbcdn.net\/v\/t39.30808-6\/9876543210123_111222_n.jpg?oh=abcdef"}}</script>
+            </body>
+            </html>
+        "#;
+        let images = extract_attached_images_from_html(html, &og_images);
+        // Only 1 unique image should be extracted, upgraded to scontent
+        assert_eq!(images.len(), 1);
+        assert_eq!(extract_fb_photo_id(&images[0]), Some("9876543210123".to_string()));
+    }
+
+    #[test]
+    fn test_multi_photo_album_extraction() {
+        let og_images = vec![
+            "https://scontent.xx.fbcdn.net/v/t39.30808-6/1000001_111_n.jpg".to_string(),
+        ];
+        let html = r#"
+            <html>
+            <head>
+                <link rel="preload" as="image" href="https://scontent.xx.fbcdn.net/v/t39.30808-6/1000001_111_n.jpg" />
+            </head>
+            <body>
+                <script type="application/json">{"photo_image":{"uri":"https:\/\/scontent.xx.fbcdn.net\/v\/t39.30808-6\/1000002_222_n.jpg"}}</script>
+                <script type="application/json">{"comet_photo_attachment":{"image":{"uri":"https:\/\/scontent.xx.fbcdn.net\/v\/t39.30808-6\/1000003_333_n.jpg"}}}</script>
+            </body>
+            </html>
+        "#;
+        let images = extract_attached_images_from_html(html, &og_images);
+        // 3 distinct photos should be extracted
+        assert_eq!(images.len(), 3);
+        assert_eq!(extract_fb_photo_id(&images[0]), Some("1000001".to_string()));
+        assert_eq!(extract_fb_photo_id(&images[1]), Some("1000002".to_string()));
+        assert_eq!(extract_fb_photo_id(&images[2]), Some("1000003".to_string()));
     }
 }

@@ -1120,11 +1120,29 @@ fn is_notion_clip_image(url: &str) -> bool {
         || lower.contains("200x200"))
 }
 
+    let mut seen_clip_ids = Vec::new();
     let valid_images: Vec<String> = content.images.iter()
         .filter(|img| {
             let s = img.as_str();
             (s.starts_with("http://") || s.starts_with("https://"))
                 && is_notion_clip_image(s)
+        })
+        .filter(|img| {
+            let s = img.as_str();
+            if let Some(pid) = crate::tools::facebook_post::extract_fb_photo_id(s) {
+                if seen_clip_ids.contains(&pid) {
+                    return false;
+                }
+                seen_clip_ids.push(pid);
+                true
+            } else {
+                let base = s.split('?').next().unwrap_or(s).to_string();
+                if seen_clip_ids.contains(&base) {
+                    return false;
+                }
+                seen_clip_ids.push(base);
+                true
+            }
         })
         .map(|img| {
             let is_fb_cdn = img.contains("lookaside.fbsbx.com")
