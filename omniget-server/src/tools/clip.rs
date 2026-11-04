@@ -1185,7 +1185,7 @@ fn is_notion_clip_image(url: &str) -> bool {
 
         if is_fb_cdn {
             let encoded: String = url::form_urlencoded::byte_serialize(img.as_bytes()).collect();
-            valid_images.push(format!("https://{}/api/proxy/image?url={}", server_domain, encoded));
+            valid_images.push(format!("https://{}/api/proxy/image/photo.jpg?url={}", server_domain, encoded));
         } else {
             valid_images.push(img.clone());
         }
@@ -1274,7 +1274,7 @@ fn is_notion_clip_image(url: &str) -> bool {
 
                     let final_img_url = if is_fb_cdn {
                         let encoded: String = url::form_urlencoded::byte_serialize(img_url.as_bytes()).collect();
-                        format!("https://{}/api/proxy/image?url={}", server_domain, encoded)
+                        format!("https://{}/api/proxy/image/photo.jpg?url={}", server_domain, encoded)
                     } else {
                         img_url.to_string()
                     };

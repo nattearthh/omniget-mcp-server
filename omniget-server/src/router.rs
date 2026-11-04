@@ -99,7 +99,8 @@ pub fn build_router(state: AppState) -> Router {
     // Public routes (no auth required)
     let public = Router::new()
         .route("/health", get(crate::auth::health_handler))
-        .route("/api/proxy/image", get(crate::rest::image_proxy_handler));
+        .route("/api/proxy/image", get(crate::rest::image_proxy_handler))
+        .route("/api/proxy/image/{*path}", get(crate::rest::image_proxy_handler));
 
     // Permissive CORS layer for cross-origin web/browser clients
     let cors = CorsLayer::new()
