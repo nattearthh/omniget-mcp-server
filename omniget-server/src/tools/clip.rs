@@ -1089,10 +1089,20 @@ async fn save_to_notion(
     }));
 
     // 5. Extracted High-Resolution Images (Rendered natively as Notion Image blocks)
-    let server_domain = std::env::var("RAILWAY_PUBLIC_DOMAIN")
+    let server_domain = std::env::var("SERVER_DOMAIN")
         .ok()
         .filter(|d| !d.trim().is_empty())
-        .unwrap_or_else(|| "omniget-mcp-server-production-ccd1.up.railway.app".to_string());
+        .or_else(|| {
+            std::env::var("RENDER_EXTERNAL_HOSTNAME")
+                .ok()
+                .filter(|d| !d.trim().is_empty())
+        })
+        .or_else(|| {
+            std::env::var("RAILWAY_PUBLIC_DOMAIN")
+                .ok()
+                .filter(|d| !d.trim().is_empty())
+        })
+        .unwrap_or_else(|| "omniget-server.onrender.com".to_string());
 
 /// Filters out avatars, emojis, and commenter profile pictures before sending to Notion.
 fn is_notion_clip_image(url: &str) -> bool {
