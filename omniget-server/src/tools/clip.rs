@@ -708,6 +708,7 @@ fn extract_canonical_identifier(url: &str) -> Option<String> {
     None
 }
 
+#[allow(dead_code)]
 struct ExistingPageInfo {
     page_id: String,
     page_url: String,
@@ -718,6 +719,7 @@ struct ExistingPageInfo {
 
 /// Checks Notion Database to detect if any of the target candidates (URLs or canonical IDs)
 /// have already been clipped.
+#[allow(dead_code)]
 async fn find_existing_notion_page(
     targets: &[&str],
     token_override: Option<&str>,
@@ -839,6 +841,7 @@ async fn find_existing_notion_page(
 }
 
 /// Updates the existing Notion page's Title to have "🔄 เคยบันทึกไปแล้ว: [เดิม]" and bumps its last_edited_time.
+#[allow(dead_code)]
 async fn mark_duplicate_notion_page(
     page_id: &str,
     current_title: &str,
@@ -1449,51 +1452,6 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
         args.token.as_deref().filter(|t| t.starts_with("ntn_") || t.starts_with("secret_"))
     });
 
-    // Step 0: Fast Pre-check for existing duplicate link in Notion unless force=true
-    if args.force != Some(true) {
-        let norm_url = normalize_source_url(trimmed_url);
-        let id_opt = extract_canonical_identifier(trimmed_url);
-        let mut candidates: Vec<&str> = vec![trimmed_url, &norm_url];
-        if let Some(ref id) = id_opt {
-            candidates.push(id.as_str());
-        }
-
-        if let Some(existing) = find_existing_notion_page(
-            &candidates,
-            notion_key,
-            args.notion_database_id.as_deref(),
-        )
-        .await
-        {
-            tracing::info!(
-                "Duplicate link detected at Step 0 (page {}): {}",
-                existing.page_id,
-                trimmed_url
-            );
-            let updated_title = mark_duplicate_notion_page(
-                &existing.page_id,
-                &existing.title,
-                notion_key,
-            )
-            .await;
-
-            return ClipResponse {
-                ok: true,
-                platform: existing.platform,
-                title: updated_title,
-                author: existing.author,
-                notion_page_id: Some(existing.page_id),
-                notion_url: Some(existing.page_url),
-                images_count: 0,
-                summary: "⚠️ ลิงก์นี้เคยบันทึกไว้ใน Notion แล้ว ระบบได้อัปเดตชื่อเรื่องใน Notion เป็น '🔄 เคยบันทึกไปแล้ว' และเปิดหน้าเดิมให้ทันทีครับ".to_string(),
-                ai_ok: true,
-                ai_model: Some("Duplicate Detector (Skipped AI)".to_string()),
-                ai_error: None,
-                error: Some("⚠️ ลิงก์นี้เคยบันทึกไว้แล้ว (อัปเดตชื่อหน้าเดิมใน Notion ให้แล้วครับ)".to_string()),
-            };
-        }
-    }
-
     // Step 1: Multi-platform extraction
     let content = extract_content(trimmed_url).await;
 
@@ -1512,51 +1470,6 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
             ai_error: None,
             error: Some(content.raw_text),
         };
-    }
-
-    // Step 1.5: Post-extraction Canonical Check (Crucial for Facebook mobile share redirects)
-    if args.force != Some(true) {
-        let norm_extracted = normalize_source_url(&content.source_url);
-        let extracted_id = extract_canonical_identifier(&content.source_url);
-        let mut candidates: Vec<&str> = vec![&content.source_url, &norm_extracted];
-        if let Some(ref id) = extracted_id {
-            candidates.push(id.as_str());
-        }
-
-        if let Some(existing) = find_existing_notion_page(
-            &candidates,
-            notion_key,
-            args.notion_database_id.as_deref(),
-        )
-        .await
-        {
-            tracing::info!(
-                "Duplicate link detected at Step 1.5 (page {}): canonical={}",
-                existing.page_id,
-                content.source_url
-            );
-            let updated_title = mark_duplicate_notion_page(
-                &existing.page_id,
-                &existing.title,
-                notion_key,
-            )
-            .await;
-
-            return ClipResponse {
-                ok: true,
-                platform: existing.platform,
-                title: updated_title,
-                author: existing.author,
-                notion_page_id: Some(existing.page_id),
-                notion_url: Some(existing.page_url),
-                images_count: 0,
-                summary: "⚠️ ลิงก์นี้เคยบันทึกไว้ใน Notion แล้ว ระบบได้อัปเดตชื่อเรื่องใน Notion เป็น '🔄 เคยบันทึกไปแล้ว' และเปิดหน้าเดิมให้ทันทีครับ".to_string(),
-                ai_ok: true,
-                ai_model: Some("Duplicate Detector (Skipped AI)".to_string()),
-                ai_error: None,
-                error: Some("⚠️ ลิงก์นี้เคยบันทึกไว้แล้ว (อัปเดตชื่อหน้าเดิมใน Notion ให้แล้วครับ)".to_string()),
-            };
-        }
     }
 
     // Step 2: AI Summarization & Title generation
