@@ -932,7 +932,10 @@ async fn save_to_notion(
         .map(|t| json!({ "name": t }))
         .collect();
 
-    let properties = json!({
+    let norm_source_url = normalize_source_url(&content.source_url);
+    let is_valid_url = norm_source_url.starts_with("http://") || norm_source_url.starts_with("https://");
+
+    let mut properties = json!({
         "Name": {
             "title": [
                 {
@@ -943,7 +946,7 @@ async fn save_to_notion(
             ]
         },
         "URL": {
-            "url": normalize_source_url(&content.source_url)
+            "url": if is_valid_url { serde_json::Value::String(norm_source_url) } else { serde_json::Value::Null }
         },
         "Platform": {
             "select": {
@@ -1018,18 +1021,30 @@ async fn save_to_notion(
                         "bold": false
                     }
                 },
-                {
-                    "type": "text",
-                    "text": {
-                        "content": "🔗 เปิดดูโพสต์ต้นฉบับ",
-                        "link": {
-                            "url": &content.source_url
+                if is_valid_url {
+                    json!({
+                        "type": "text",
+                        "text": {
+                            "content": "🔗 เปิดดูโพสต์ต้นฉบับ",
+                            "link": {
+                                "url": &content.source_url
+                            }
+                        },
+                        "annotations": {
+                            "bold": true,
+                            "underline": true
                         }
-                    },
-                    "annotations": {
-                        "bold": true,
-                        "underline": true
-                    }
+                    })
+                } else {
+                    json!({
+                        "type": "text",
+                        "text": {
+                            "content": "🔗 แหล่งข้อมูลต้นฉบับ"
+                        },
+                        "annotations": {
+                            "bold": false
+                        }
+                    })
                 }
             ]
         }
@@ -1359,25 +1374,75 @@ fn is_notion_clip_image(url: &str) -> bool {
     Ok((page_id, page_url))
 }
 
+/// Cleans, extracts, and validates an input URL.
+/// Handles:
+/// - Leading/trailing whitespace
+/// - Strings with surrounding text (e.g. "Check this out https://example.com/page")
+/// - Missing scheme for valid domains (e.g. "facebook.com/share/p/123" -> "https://facebook.com/share/p/123")
+pub fn sanitize_input_url(input: &str) -> Result<String, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("URL parameter cannot be empty".to_string());
+    }
+
+    // 1. Try extracting an explicit http:// or https:// link from surrounding text
+    static URL_IN_TEXT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"https?://[^\s<>"'`]+"#).expect("Valid URL in text regex")
+    });
+
+    if let Some(m) = URL_IN_TEXT_REGEX.find(trimmed) {
+        let extracted = m.as_str().to_string();
+        if let Ok(parsed) = url::Url::parse(&extracted) {
+            if parsed.has_host() {
+                return Ok(extracted);
+            }
+        }
+    }
+
+    // 2. If no scheme, check if it's a domain-like string (no spaces, contains dot)
+    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        if trimmed.contains('.') && !trimmed.contains(' ') {
+            let with_https = format!("https://{}", trimmed);
+            if let Ok(parsed) = url::Url::parse(&with_https) {
+                if parsed.has_host() {
+                    return Ok(with_https);
+                }
+            }
+        }
+    } else if let Ok(parsed) = url::Url::parse(trimmed) {
+        if parsed.has_host() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    Err(format!(
+        "Invalid URL: '{}' does not appear to be a valid web address (must include domain or http/https)",
+        trimmed
+    ))
+}
+
 /// Executes the full universal clipping pipeline.
 pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
-    let trimmed_url = args.url.trim();
-    if trimmed_url.is_empty() {
-        return ClipResponse {
-            ok: false,
-            platform: "Unknown".to_string(),
-            title: "Empty URL".to_string(),
-            author: None,
-            notion_page_id: None,
-            notion_url: None,
-            images_count: 0,
-            summary: String::new(),
-            ai_ok: false,
-            ai_model: None,
-            ai_error: None,
-            error: Some("URL parameter cannot be empty".to_string()),
-        };
-    }
+    let sanitized_url = match sanitize_input_url(&args.url) {
+        Ok(u) => u,
+        Err(err_msg) => {
+            return ClipResponse {
+                ok: false,
+                platform: "Unknown".to_string(),
+                title: "Invalid URL".to_string(),
+                author: None,
+                notion_page_id: None,
+                notion_url: None,
+                images_count: 0,
+                summary: format!("❌ {}", err_msg),
+                ai_ok: false,
+                ai_model: None,
+                ai_error: None,
+                error: Some(err_msg),
+            };
+        }
+    };
+    let trimmed_url = sanitized_url.as_str();
 
     // Resolve Notion API key from notion_api_key, or token if it's explicitly a Notion token
     let notion_key = args.notion_api_key.as_deref().or_else(|| {
@@ -1431,6 +1496,23 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
 
     // Step 1: Multi-platform extraction
     let content = extract_content(trimmed_url).await;
+
+    if content.raw_text.starts_with("Extraction error:") {
+        return ClipResponse {
+            ok: false,
+            platform: content.platform,
+            title: "Extraction Error".to_string(),
+            author: None,
+            notion_page_id: None,
+            notion_url: None,
+            images_count: 0,
+            summary: format!("❌ ดึงข้อมูลจากเว็บไซต์ไม่สำเร็จ: {}", content.raw_text),
+            ai_ok: false,
+            ai_model: None,
+            ai_error: None,
+            error: Some(content.raw_text),
+        };
+    }
 
     // Step 1.5: Post-extraction Canonical Check (Crucial for Facebook mobile share redirects)
     if args.force != Some(true) {
@@ -1539,6 +1621,24 @@ pub async fn execute_clip(args: ClipArgs) -> ClipResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_sanitize_input_url() {
+        assert_eq!(
+            sanitize_input_url("https://example.com/test").unwrap(),
+            "https://example.com/test"
+        );
+        assert_eq!(
+            sanitize_input_url("example.com/test").unwrap(),
+            "https://example.com/test"
+        );
+        assert_eq!(
+            sanitize_input_url("Check this: https://facebook.com/share/p/123/ more text").unwrap(),
+            "https://facebook.com/share/p/123/"
+        );
+        assert!(sanitize_input_url("relative-page-random").is_err());
+        assert!(sanitize_input_url("   ").is_err());
+    }
 
     #[test]
     fn test_normalize_source_url_tracking_removal() {

@@ -350,7 +350,19 @@ pub fn validate_url(url_str: &str) -> Result<Url> {
     if trimmed.is_empty() {
         return Err(anyhow!("URL cannot be empty"));
     }
-    let parsed = Url::parse(trimmed).map_err(|e| anyhow!("Invalid URL: {}", e))?;
+    let to_parse = if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        if trimmed.contains('.') && !trimmed.contains(' ') {
+            format!("https://{}", trimmed)
+        } else {
+            return Err(anyhow!(
+                "Invalid URL: '{}' lacks a scheme and does not appear to be a valid domain",
+                trimmed
+            ));
+        }
+    } else {
+        trimmed.to_string()
+    };
+    let parsed = Url::parse(&to_parse).map_err(|e| anyhow!("Invalid URL: {}", e))?;
     match parsed.scheme() {
         "http" | "https" => Ok(parsed),
         scheme => Err(anyhow!(
